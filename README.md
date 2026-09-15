@@ -1,4 +1,5 @@
-# PedagoLoop
+# NoviceTeacher-AI
+
 
 **A Knowledge-Augmented Human-AI Framework for Scaffolding Novice Teacher Lesson-Plan Revision and Professional Growth**
 
