@@ -675,3 +675,5 @@ footer span:first-child {
 :root .section-nav {
   min-width: 0;
 }
+:root .history-row{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #eee;padding:12px 0;align-items:center}
+:root .source-note,:root .candidate-box{padding:15px;background:#f3f6ef;margin-top:14px;font-size:12px;overflow-wrap:anywhere}

@@ -1,5 +1,5 @@
 """Research contracts: providers receive plain snapshots, never a live DB session."""
-from typing import Protocol, Any
+from typing import Protocol, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -23,11 +23,20 @@ class SuggestionDraft(BaseModel):
     reason: str = Field(min_length=1, max_length=4000)
     pedagogical_basis: str = Field(min_length=1, max_length=4000)
     revision: str = Field(min_length=1, max_length=8000)
+    issue_type: Literal['missing_component', 'objective_measurability', 'learner_analysis',
+        'content_accuracy', 'pedagogical_alignment', 'activity_design', 'assessment_alignment',
+        'interaction_quality', 'cross_section_consistency', 'resource_design', 'document_quality', 'other'] = 'other'
+    scope: Literal['local', 'cross_section', 'global'] = 'local'
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    revision_mode: Literal['append', 'replace'] = 'append'
+    target_text: str | None = None
+    knowledge_ids: list[str] = Field(default_factory=list)
 
 
 class MemoryContext(BaseModel):
     latest_content: str
     rejected_suggestions: list[dict] = Field(default_factory=list)
+    accepted_suggestions: list[dict] = Field(default_factory=list)
 
 
 class LLMContext(BaseModel):
@@ -40,7 +49,7 @@ class SectionParser(Protocol):
 
 
 class SuggestionProvider(Protocol):
-    def generate(self, session: dict, round: dict, section: dict, context: LLMContext) -> list[SuggestionDraft]: ...
+    def generate(self, context: LLMContext) -> list[SuggestionDraft]: ...
 
 
 class KnowledgeRetriever(Protocol):
@@ -66,4 +75,11 @@ class InquiryProvider(Protocol):
 
 
 class RevisionStrategy(Protocol):
-    def apply(self, section_content: str, suggestion: SuggestionDraft) -> str: ...
+    def apply(self, section_content: str, suggestion: SuggestionDraft) -> 'RevisionResult': ...
+
+
+class RevisionResult(BaseModel):
+    status: Literal['applied', 'candidate']
+    content: str
+    candidate: str | None = None
+    reason: str | None = None

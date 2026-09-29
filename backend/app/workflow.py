@@ -11,6 +11,9 @@ from . import models as m
 from .history import HistoryReader
 from .orchestrator import ReviewOrchestrator
 from .providers.interfaces import SuggestionDraft
+from .context import ContextBuildRequest
+from .audit import GenerationAudit
+from .auth import AuthorizationPolicy
 
 
 class WorkflowError(Exception):
@@ -28,44 +31,47 @@ def dump(row):
 
 
 class Workflow:
-    def __init__(self, db, factory):
-        self.db, self.factory = db, factory
+    def __init__(self, db, factory, current_user):
+        self.db, self.factory, self.current_user = db, factory, current_user
 
     def add(self, cls, **values):
+        if hasattr(cls, 'user_id'): values['user_id'] = self.current_user.id
         row = cls(**values)
         self.db.add(row)
         self.db.flush()
         return row
 
     def one(self, cls, **where):
+        if hasattr(cls, 'user_id'): where['user_id'] = self.current_user.id
         return self.db.scalar(select(cls).filter_by(**where))
 
     def rows(self, cls, **where):
+        if hasattr(cls, 'user_id'): where['user_id'] = self.current_user.id
         return self.db.scalars(select(cls).filter_by(**where).order_by(cls.created_at, cls.id)).all()
 
     def session(self, session_id):
-        row = self.db.scalar(select(m.Session).where(m.Session.id == session_id).with_for_update())
-        if not row:
+        row = self.db.scalar(select(m.Session).where(m.Session.id == session_id, m.Session.user_id == self.current_user.id).with_for_update())
+        if not row or not AuthorizationPolicy().can_access(self.current_user, row):
             raise WorkflowError('找不到此会话，请检查恢复链接。', 404)
         return row
 
     def config(self, session):
-        return self.factory.build(session.config_snapshot, HistoryReader(self.db))
+        return self.factory.build(session.config_snapshot, HistoryReader(self.db, self.current_user.id))
 
     def event(self, session, event_type, payload=None, round_id=None, section_id=None):
         sequence = self.db.scalar(select(func.coalesce(func.max(m.InteractionEvent.sequence), 0))
-                                  .where(m.InteractionEvent.session_id == session.id)) + 1
+                                  .where(m.InteractionEvent.session_id == session.id, m.InteractionEvent.user_id == self.current_user.id)) + 1
         session.updated_at = m.now()
         return self.add(m.InteractionEvent, participant_id=session.participant_id, session_id=session.id,
             round_id=round_id, section_id=section_id, sequence=sequence,
             event_type=event_type, event_payload=payload or {})
 
     def sections(self, lesson_id):
-        return self.db.scalars(select(m.Section).where(m.Section.lesson_plan_id == lesson_id)
+        return self.db.scalars(select(m.Section).where(m.Section.lesson_plan_id == lesson_id, m.Section.user_id == self.current_user.id)
                                .order_by(m.Section.order_index)).all()
 
     def latest(self, section_id):
-        return self.db.scalar(select(m.SectionVersion).where(m.SectionVersion.section_id == section_id)
+        return self.db.scalar(select(m.SectionVersion).where(m.SectionVersion.section_id == section_id, m.SectionVersion.user_id == self.current_user.id)
                               .order_by(m.SectionVersion.version_number.desc()).limit(1))
 
     def create_session(self, data):
@@ -83,10 +89,13 @@ class Workflow:
         participant = self.add(m.Participant)
         session = self.add(m.Session, participant_id=participant.id, request_key=str(data.request_key),
                            input_hash=fingerprint, lesson_metadata=payload['metadata'], config_snapshot=snapshot)
+        self.add(m.SystemConfigSnapshot, session_id=session.id, version=snapshot['version'], config=snapshot)
+        self.add(m.Conversation, session_id=session.id)
         self.event(session, 'SESSION_CREATED', {'config': snapshot})
         lesson = self.add(m.LessonPlan, session_id=session.id, original_content=data.content, current_content=data.content)
         original = self.add(m.LessonPlanVersion, lesson_plan_id=lesson.id, round_number=0, content=data.content)
         self.event(session, 'LESSON_PLAN_SUBMITTED', {'lesson_plan_id': lesson.id, 'version_id': original.id})
+        self.chat(session, 'user', data.content, 'lesson_plan')
         drafts = self.config(session).section_parser.parse(data.content, payload['metadata'])
         if not drafts or ''.join(d.content for d in drafts) != data.content:
             raise WorkflowError('切分器必须返回非空列表并完整保留原文。', 422)
@@ -97,6 +106,7 @@ class Workflow:
             self.add(m.SectionVersion, section_id=section.id, round_number=0, version_number=0, content=draft.content)
             sections.append(section)
         self.event(session, 'SECTIONS_PARSED', {'parser': snapshot['section_parser'], 'section_ids': [s.id for s in sections]})
+        self.ensure_overview(session, sections)
         self.start_round(session, sections, 1)
         return session
 
@@ -116,7 +126,7 @@ class Workflow:
         result = []
         for section in sections:
             review = self.one(m.SectionReview, round_id=round.id, section_id=section.id)
-            suggestions = self.db.scalars(select(m.Suggestion).where(m.Suggestion.round_id == round.id,
+            suggestions = self.db.scalars(select(m.Suggestion).where(m.Suggestion.user_id == self.current_user.id, m.Suggestion.round_id == round.id,
                 m.Suggestion.section_id == section.id).order_by(m.Suggestion.suggestion_index)).all()
             result.append({**dump(section), 'version': dump(self.latest(section.id)), 'review': dump(review),
                 'suggestions': [{**dump(s), 'decision': (dump(d) if (d := self.one(m.Decision, suggestion_id=s.id)) else None)}
@@ -163,10 +173,15 @@ class Workflow:
         if review.generated_at:
             return None
         audit = GenerationAudit(self, session, round, section, review)
-        _, error = ReviewOrchestrator(self.config(session)).generate(dump(session), dump(round), dump(section), audit)
+        sections = self.sections(section.lesson_plan_id)
+        overview = self.ensure_overview(session, sections)
+        snapshots = [{**dump(s), 'version_id': self.latest(s.id).id} for s in sections]
+        request = ContextBuildRequest(user_id=self.current_user.id, session=dump(session), round=dump(round),
+            section=next(s for s in snapshots if s['id'] == section.id), all_sections=snapshots, overview=dump(overview))
+        _, error = ReviewOrchestrator(self.config(session)).generate(request, audit)
         return error
 
-    def decide(self, session, suggestion_id, decision):
+    def decide(self, session, suggestion_id, decision, confirm_append=False, expected_version_id=None):
         suggestion = self.one(m.Suggestion, id=suggestion_id)
         if not suggestion or not self.one(m.Round, id=suggestion.round_id, session_id=session.id):
             raise WorkflowError('找不到此会话的建议。', 404)
@@ -178,13 +193,26 @@ class Workflow:
                 raise WorkflowError('已保存的决定不可更改。')
             return
         round, section, _ = self.active_target(session, suggestion.round_id, suggestion.section_id)
-        saved = self.add(m.Decision, suggestion_id=suggestion.id, session_id=session.id,
-                         round_id=round.id, section_id=section.id, decision=decision)
-        self.event(session, 'SUGGESTION_ACCEPTED' if decision == 'ACCEPT' else 'SUGGESTION_REJECTED',
-                   {'suggestion_id': suggestion.id, 'decision_id': saved.id}, round.id, section.id)
+        content = section.current_content
         if decision == 'ACCEPT':
             draft = SuggestionDraft(**{key: getattr(suggestion, key) for key in SuggestionDraft.model_fields})
-            content = self.config(session).revision_strategy.apply(section.current_content, draft)
+            if confirm_append:
+                if expected_version_id != self.latest(section.id).id:
+                    raise WorkflowError('正文已变化，请恢复最新状态后重新确认。')
+                draft = draft.model_copy(update={'revision_mode': 'append'})
+            result = self.config(session).revision_strategy.apply(section.current_content, draft)
+            if result.status == 'candidate':
+                self.event(session, 'REVISION_CANDIDATE_SHOWN', {'suggestion_id': suggestion.id,
+                    'candidate': result.candidate, 'reason': result.reason}, round.id, section.id)
+                return {'suggestion_id': suggestion.id, 'candidate': result.candidate, 'reason': result.reason,
+                        'expected_version_id': self.latest(section.id).id}
+            content = result.content
+        saved = self.add(m.Decision, suggestion_id=suggestion.id, session_id=session.id,
+                         round_id=round.id, section_id=section.id, decision=decision)
+        self.chat(session, 'user', decision, 'decision', section.id, suggestion.id)
+        self.event(session, 'SUGGESTION_ACCEPTED' if decision == 'ACCEPT' else 'SUGGESTION_REJECTED',
+                   {'suggestion_id': suggestion.id, 'decision_id': saved.id, 'confirmed_append': confirm_append}, round.id, section.id)
+        if decision == 'ACCEPT':
             if content != section.current_content:
                 previous = self.latest(section.id)
                 version = self.add(m.SectionVersion, section_id=section.id, round_number=round.round_number,
@@ -250,41 +278,41 @@ class Workflow:
     def export(self, session):
         state = self.get_current_state(session)
         section_ids = [s['id'] for s in state['sections']]
-        result = {'schema_version': 1, 'state': state, 'participant': dump(self.one(m.Participant, id=session.participant_id))}
-        for cls in (m.Round, m.Decision, m.CustomPrompt, m.RetrievalRecord, m.GenerationRecord):
+        result = {'schema_version': 2, 'user_id': self.current_user.id, 'state': state, 'participant': dump(self.one(m.Participant, id=session.participant_id))}
+        for cls in (m.Round, m.Decision, m.CustomPrompt, m.RetrievalRecord, m.GenerationRecord, m.ContextSnapshot, m.SystemConfigSnapshot, m.LessonOverview):
             result[cls.__tablename__] = [dump(x) for x in self.rows(cls, session_id=session.id)]
         result['interaction_events'] = [dump(x) for x in self.db.scalars(select(m.InteractionEvent)
-            .where(m.InteractionEvent.session_id == session.id).order_by(m.InteractionEvent.sequence))]
+            .where(m.InteractionEvent.session_id == session.id, m.InteractionEvent.user_id == self.current_user.id).order_by(m.InteractionEvent.sequence))]
         for cls in (m.SectionVersion, m.Suggestion, m.SectionReview):
-            query = select(cls).where(cls.section_id.in_(section_ids)).order_by(cls.created_at, cls.id)
+            query = select(cls).where(cls.section_id.in_(section_ids), cls.user_id == self.current_user.id).order_by(cls.created_at, cls.id)
             result[cls.__tablename__] = [dump(x) for x in self.db.scalars(query)]
+        conversation = self.one(m.Conversation, session_id=session.id)
+        result['chat_messages'] = [dump(x) for x in self.rows(m.ChatMessage, conversation_id=conversation.id)] if conversation else []
+        result['summary'] = {'section_count': len(section_ids), 'round_count': len(result['rounds']),
+            'suggestions': len(result['suggestions']), 'accepts': sum(x['decision'] == 'ACCEPT' for x in result['decisions']),
+            'rejects': sum(x['decision'] == 'REJECT' for x in result['decisions']),
+            'duration_seconds': max(0, ((session.terminated_at or m.now()).replace(tzinfo=timezone.utc) - session.created_at.replace(tzinfo=timezone.utc)).total_seconds())}
+        result['failures'] = [x for x in result['generation_records'] if x['error_code']]
         return result
 
+    def ensure_overview(self, session, sections):
+        overview = self.one(m.LessonOverview, session_id=session.id)
+        if overview: return overview
+        def excerpts(types):
+            return [{'section_id': s.id, 'excerpt': s.current_content[:800], 'truncated': len(s.current_content) > 800}
+                    for s in sections if s.section_type in types]
+        return self.add(m.LessonOverview, session_id=session.id, content={
+            **session.lesson_metadata, 'section_list': [{'id': s.id, 'title': s.title, 'type': s.section_type} for s in sections],
+            'recognized_objectives': excerpts(['objectives']), 'activity_overview': excerpts(['exploration','practice','teaching_process']),
+            'assessment_overview': excerpts(['assessment']), 'short_lesson_summary': ' / '.join(s.title for s in sections),
+            'basis': 'section_excerpts_at_overview_creation', 'generated_once': True})
 
-class GenerationAudit:
-    def __init__(self, workflow, session, round, section, review):
-        self.w, self.session, self.round, self.section, self.review = workflow, session, round, section, review
+    def chat(self, session, role, content, message_type, section_id=None, suggestion_id=None):
+        conversation = self.one(m.Conversation, session_id=session.id)
+        if not conversation: conversation = self.add(m.Conversation, session_id=session.id)
+        return self.add(m.ChatMessage, conversation_id=conversation.id, role=role, content=content,
+            message_type=message_type, related_section_id=section_id, related_suggestion_id=suggestion_id)
 
-    def started(self, context, knowledge):
-        self.w.add(m.RetrievalRecord, session_id=self.session.id, round_id=self.round.id,
-                   section_id=self.section.id, items=[x.model_dump() for x in knowledge])
-        return self.w.add(m.GenerationRecord, session_id=self.session.id, round_id=self.round.id,
-            section_id=self.section.id, section_version_id=self.w.latest(self.section.id).id,
-            provider_type=self.session.config_snapshot['provider'], runtime_context=context.model_dump(mode='json'))
-
-    def failed(self, generation, error):
-        generation.error_code, generation.raw_response = error.code, error.raw
-        self.w.event(self.session, 'SUGGESTION_GENERATION_FAILED', {'generation_id': generation.id, 'error_code': error.code},
-                     self.round.id, self.section.id)
-
-    def completed(self, generation, suggestions, raw):
-        generation.raw_response = raw or {'suggestions': [x.model_dump() for x in suggestions]}
-        ids = []
-        for i, draft in enumerate(suggestions, 1):
-            suggestion = self.w.add(m.Suggestion, section_id=self.section.id, round_id=self.round.id,
-                generation_id=generation.id, suggestion_index=i, provider_type=generation.provider_type,
-                basis_type='mock' if generation.provider_type == 'mock' else 'provisional_model', **draft.model_dump())
-            ids.append(suggestion.id)
-        self.review.generated_at = m.now()
-        self.w.event(self.session, 'SUGGESTION_GENERATED', {'generation_id': generation.id, 'suggestion_ids': ids,
-                     'section_version_id': generation.section_version_id}, self.round.id, self.section.id)
+    def list_sessions(self):
+        return [dump(s) for s in self.db.scalars(select(m.Session).where(m.Session.user_id == self.current_user.id)
+            .order_by(m.Session.updated_at.desc()))]

@@ -72,8 +72,8 @@ def test_real_http_adapter_schema_and_count(count, base_url, model):
     provider = GenericLLMSuggestionProvider(CompatibleLLMClient(base_url, model,
         'test-key', transport=httpx.MockTransport(handler), extra_body={'thinking': {'type': 'disabled'}}))
     if count > 2:
-        with pytest.raises(ProviderError): provider.generate({}, {}, section, ctx)
-    else: assert len(provider.generate({}, {}, section, ctx)) == count
+        with pytest.raises(ProviderError): provider.generate(ctx)
+    else: assert len(provider.generate(ctx)) == count
 
 
 @pytest.mark.parametrize('response', [None, {}, {'choices': []}, {'choices': [{'finish_reason': 'length', 'message': {'content': '{}'}}]},
@@ -83,7 +83,7 @@ def test_malformed_llm(response):
     class Fake:
         def complete(self, ctx): return response
     section, ctx = context()
-    with pytest.raises(ProviderError): GenericLLMSuggestionProvider(Fake()).generate({}, {}, section, ctx)
+    with pytest.raises(ProviderError): GenericLLMSuggestionProvider(Fake()).generate(ctx)
 
 
 @pytest.mark.parametrize('mode', ['timeout', 'http', 'network', 'key'])

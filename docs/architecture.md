@@ -1,5 +1,7 @@
 # Architecture & research boundaries
 
+> 以下保留为 **v1 MVP 架构记录**，对应旧会话兼容路径。当前 alpha 架构、接口、认证、检索和已知限制请以 [alpha.md](alpha.md) 为准。
+
 ## Dependency direction
 
 ```mermaid

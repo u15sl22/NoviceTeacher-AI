@@ -21,6 +21,8 @@ class CreateSession(BaseModel):
 
 class Decide(BaseModel):
     decision: Literal['ACCEPT', 'REJECT']
+    confirm_append: bool = False
+    expected_version_id: UUID | None = None
 
 
 class ReviewTarget(BaseModel):

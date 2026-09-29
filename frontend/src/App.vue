@@ -18,6 +18,12 @@ const savedId = ref(
 const recoveryId = ref(savedId.value);
 const pendingKey = ref(localStorage.getItem("pedago.pending-key") || "");
 const selectedVersion = ref(null);
+const mySessions = ref([]), currentUser = ref(null), capabilities = ref(null);
+async function loadHistory() {
+  currentUser.value = await request('/me');
+  mySessions.value = await request('/sessions');
+  capabilities.value = await request('/capabilities');
+}
 const current = computed(() =>
   state.value?.sections.find(
     (s) => s.id === state.value.session.current_section_id,
@@ -152,6 +158,7 @@ function newLesson() {
   selectedVersion.value = null;
   error.value = "";
   history.replaceState(null, "", location.pathname);
+  run(loadHistory);
 }
 function downloadText() {
   const blob = new Blob([finalContent.value], {
@@ -184,6 +191,7 @@ onMounted(async () => {
   }
   try {
     health.value = await request("/health");
+    await loadHistory();
   } catch (e) {
     error.value = e.message;
   }
@@ -200,7 +208,7 @@ onMounted(async () => {
         ><span>PedagoLoop<small>教案修订工作台</small></span></a
       >
       <div class="top-meta">
-        <span class="edition">RESEARCH PREVIEW · 0.1</span
+        <span class="edition">INTERNAL PILOT · ALPHA</span
         ><el-tag
           :type="provider === 'mock' ? 'warning' : 'success'"
           effect="plain"
@@ -238,6 +246,8 @@ onMounted(async () => {
       >
 
       <template v-if="!state && !booting">
+        <el-alert v-if="capabilities" type="info" :closable="false" style="margin-bottom:20px"
+          :title="`案例库：${capabilities.verified_cases} 条已核验；知识库：${capabilities.verified_knowledge} 条已核验；${capabilities.raw_annotations} 条原始批注未进入检索。`" />
         <div class="intro">
           <p class="eyebrow">REFLECT. REVISE. GROW.</p>
           <h1>让每一次修订，<br />都有迹可循。</h1>
@@ -325,7 +335,7 @@ onMounted(async () => {
               <b>02</b>
               <div>
                 <h3>每条建议，自主选择</h3>
-                <p>采纳后补充正文，拒绝也会完整保留。</p>
+                <p>采纳后安全替换或补充正文，拒绝也会完整保留。</p>
               </div>
             </div>
             <div class="principle">
@@ -336,7 +346,7 @@ onMounted(async () => {
               </div>
             </div>
             <div class="aside-note">
-              当前为研究原型。教学依据是暂定解释，未经知识库检索验证。
+              当前为内部试用版。只有已核验资料可参与检索；模型解释与原始来源分别标注。
             </div>
           </aside>
         </div>
@@ -354,6 +364,14 @@ onMounted(async () => {
             @click="recover(recoveryId)"
             >恢复会话</el-button
           >
+        </section>
+        <section class="panel" style="padding:24px;margin-top:24px">
+          <h3>我的历史 <span class="muted">{{ currentUser?.username }}</span></h3>
+          <p v-if="!mySessions.length" class="muted">当前用户还没有修订记录。</p>
+          <div v-for="item in mySessions" :key="item.id" class="history-row">
+            <div><strong>{{ item.lesson_metadata.topic }}</strong><p class="muted">{{ item.lesson_metadata.subject }} · {{ item.lesson_metadata.grade }} · {{ { CREATED: '已创建', ACTIVE: '修订中', ROUND_COMPLETED: '本轮已完成', TERMINATED: '已结束' }[item.status] || item.status }} · {{ new Date(item.updated_at).toLocaleString() }}</p></div>
+            <el-button :disabled="busy" @click="recover(item.id)">查看 / 继续</el-button>
+          </div>
         </section>
       </template>
 
@@ -497,10 +515,14 @@ onMounted(async () => {
                   <dd>{{ suggestion.reason }}</dd>
                   <dt>
                     教学依据 / Pedagogical basis
-                    <span class="basis-label">暂定 · 未经知识库验证</span>
+                    <span class="basis-label">{{ suggestion.basis_type === 'verified_source' ? '引用已核验资料 · 以下解释由模型生成' : '暂定 · 未经知识库验证' }}</span>
                   </dt>
                   <dd>{{ suggestion.pedagogical_basis }}</dd>
-                  <dt>建议补充的正文 / Revision</dt>
+                  <dd v-for="source in suggestion.basis_sources || []" :key="source.id" class="source-note">
+                    <strong>来源：{{ source.source }} · {{ source.source_locator }}</strong><br>{{ source.content }}
+                  </dd>
+                  <dt>{{ suggestion.revision_mode === 'replace' ? '建议替换的正文' : '建议补充的正文' }} / Revision</dt>
+                  <dd v-if="suggestion.target_text" class="muted">替换位置：{{ suggestion.target_text }}</dd>
                   <dd class="revision-text">{{ suggestion.revision }}</dd>
                 </dl>
                 <div v-if="!suggestion.decision" class="decision-actions">
@@ -521,7 +543,11 @@ onMounted(async () => {
                       })
                     "
                     >No · 拒绝</el-button
-                  ><span class="muted">采纳后将追加到本单元</span>
+                  ><span class="muted">{{ suggestion.revision_mode === 'replace' ? '仅在原文定位唯一时替换' : '采纳后将追加到本单元' }}</span>
+                </div>
+                <div v-if="state.revision_candidate?.suggestion_id === suggestion.id && !suggestion.decision" class="candidate-box">
+                  <p>{{ state.revision_candidate.reason }}</p><pre class="lesson-text">{{ state.revision_candidate.candidate }}</pre>
+                  <el-button :disabled="busy" @click="mutate('/suggestions/' + suggestion.id + '/decision', {decision:'ACCEPT', confirm_append:true, expected_version_id:state.revision_candidate.expected_version_id})">作为补充采纳（保留原文）</el-button>
                 </div>
               </article>
             </section>
@@ -635,7 +661,7 @@ onMounted(async () => {
     </main>
     <footer>
       <span>PedagoLoop</span><span>A space for thoughtful teaching.</span
-      ><span>研究原型 · MVP</span>
+      ><span>内部试用 · Alpha</span>
     </footer>
   </div>
 </template>

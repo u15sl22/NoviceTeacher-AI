@@ -3,27 +3,23 @@ from .providers.llm import ProviderError
 
 
 class ReviewOrchestrator:
-    """Only coordinates injected contracts; the audit sink persists each stage."""
-    def __init__(self, config):
-        self.config = config
+    """Identity/scope and transaction are supplied by Workflow. No capability-specific branches."""
+    def __init__(self, config): self.config = config
 
-    def generate(self, session, round, section, audit):
-        cfg = self.config
-        knowledge = cfg.knowledge_retriever.retrieve(section, session['lesson_metadata'])
-        memory = cfg.memory_provider.build_memory(session, round, section)
-        context = cfg.context_builder.build(section, session['lesson_metadata'], memory, knowledge)
-        generation = audit.started(context, knowledge)
+    def generate(self, request, audit):
+        generation = None
         try:
-            suggestions = cfg.suggestion_provider.generate(session, round, section, context)
-            if len(suggestions) > 2:
-                raise ProviderError('PROVIDER_CONTRACT', '建议提供器超过两条建议，未保存建议。')
+            context = self.config.context_engine.prepare(request, audit)
+            generation = audit.started(context)
+            suggestions = self.config.suggestion_provider.generate(context)
+            if len(suggestions) > 2: raise ValueError('More than two suggestions')
             suggestions = [SuggestionDraft.model_validate(x) for x in suggestions]
-        except ProviderError as exc:
-            audit.failed(generation, exc)
-            return None, exc
-        except (ValueError, TypeError) as exc:
-            error = ProviderError('PROVIDER_CONTRACT', '建议提供器返回值不符合接口约定，未应用修改。')
+            audit.completed(generation, suggestions, getattr(self.config.suggestion_provider, 'last_raw', None))
+        except ProviderError as error:
             audit.failed(generation, error)
             return None, error
-        audit.completed(generation, suggestions, getattr(cfg.suggestion_provider, 'last_raw', None))
+        except (ValueError, TypeError):
+            error = ProviderError('PROVIDER_CONTRACT', '上下文或建议不符合接口约定，未应用修改。')
+            audit.failed(generation, error)
+            return None, error
         return suggestions, None

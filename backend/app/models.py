@@ -26,15 +26,27 @@ class Record:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
-class Participant(Record, Base):
+class Owned:
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+
+
+class User(Record, Base):
+    __tablename__ = 'users'
+    username: Mapped[str] = mapped_column(String(200), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(30), default='user')
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Participant(Owned, Record, Base):
     __tablename__ = 'participants'
 
 
-class Session(Record, Base):
+class Session(Owned, Record, Base):
     __tablename__ = 'sessions'
-    __table_args__ = (CheckConstraint("status IN ('CREATED','ACTIVE','ROUND_COMPLETED','TERMINATED')"),)
+    __table_args__ = (CheckConstraint("status IN ('CREATED','ACTIVE','ROUND_COMPLETED','TERMINATED')"), UniqueConstraint('user_id', 'request_key'))
     participant_id: Mapped[str] = mapped_column(ForeignKey('participants.id'))
-    request_key: Mapped[str] = mapped_column(String(36), unique=True)
+    request_key: Mapped[str] = mapped_column(String(36))
     input_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24), default='CREATED')
     current_round_number: Mapped[int] = mapped_column(Integer, default=0)
@@ -46,14 +58,14 @@ class Session(Record, Base):
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class LessonPlan(Record, Base):
+class LessonPlan(Owned, Record, Base):
     __tablename__ = 'lesson_plans'
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), unique=True)
     original_content: Mapped[str] = mapped_column(Text)
     current_content: Mapped[str] = mapped_column(Text)
 
 
-class LessonPlanVersion(Record, Base):
+class LessonPlanVersion(Owned, Record, Base):
     __tablename__ = 'lesson_plan_versions'
     __table_args__ = (UniqueConstraint('lesson_plan_id', 'round_number'),)
     lesson_plan_id: Mapped[str] = mapped_column(ForeignKey('lesson_plans.id'))
@@ -61,7 +73,7 @@ class LessonPlanVersion(Record, Base):
     content: Mapped[str] = mapped_column(Text)
 
 
-class Round(Record, Base):
+class Round(Owned, Record, Base):
     __tablename__ = 'rounds'
     __table_args__ = (UniqueConstraint('session_id', 'round_number'),
                      CheckConstraint("status IN ('ACTIVE','COMPLETED')"),
@@ -73,7 +85,7 @@ class Round(Record, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class Section(Record, Base):
+class Section(Owned, Record, Base):
     __tablename__ = 'sections'
     __table_args__ = (UniqueConstraint('lesson_plan_id', 'order_index'),)
     lesson_plan_id: Mapped[str] = mapped_column(ForeignKey('lesson_plans.id'))
@@ -84,7 +96,7 @@ class Section(Record, Base):
     current_content: Mapped[str] = mapped_column(Text)
 
 
-class SectionVersion(Record, Base):
+class SectionVersion(Owned, Record, Base):
     __tablename__ = 'section_versions'
     __table_args__ = (UniqueConstraint('section_id', 'version_number'),)
     section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
@@ -94,7 +106,7 @@ class SectionVersion(Record, Base):
     previous_version_id: Mapped[str | None] = mapped_column(ForeignKey('section_versions.id'))
 
 
-class SectionReview(Record, Base):
+class SectionReview(Owned, Record, Base):
     """Durable per-round progress, including generated-but-empty suggestions."""
     __tablename__ = 'section_reviews'
     __table_args__ = (UniqueConstraint('round_id', 'section_id'),)
@@ -104,7 +116,7 @@ class SectionReview(Record, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class GenerationRecord(Record, Base):
+class GenerationRecord(Owned, Record, Base):
     __tablename__ = 'generation_records'
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
@@ -116,7 +128,7 @@ class GenerationRecord(Record, Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
 
 
-class Suggestion(Record, Base):
+class Suggestion(Owned, Record, Base):
     __tablename__ = 'suggestions'
     __table_args__ = (UniqueConstraint('round_id', 'section_id', 'suggestion_index'),
                      CheckConstraint('suggestion_index BETWEEN 1 AND 2'))
@@ -130,9 +142,16 @@ class Suggestion(Record, Base):
     basis_type: Mapped[str] = mapped_column(String(40), default='provisional_model')
     revision: Mapped[str] = mapped_column(Text)
     provider_type: Mapped[str] = mapped_column(String(100))
+    issue_type: Mapped[str] = mapped_column(String(50), default='other')
+    scope: Mapped[str] = mapped_column(String(30), default='local')
+    confidence: Mapped[float | None]
+    target_text: Mapped[str | None] = mapped_column(Text)
+    revision_mode: Mapped[str] = mapped_column(String(20), default='append')
+    knowledge_ids: Mapped[list] = mapped_column(json_type, default=list)
+    basis_sources: Mapped[list] = mapped_column(json_type, default=list)
 
 
-class Decision(Record, Base):
+class Decision(Owned, Record, Base):
     __tablename__ = 'decisions'
     __table_args__ = (CheckConstraint("decision IN ('ACCEPT','REJECT')"),)
     suggestion_id: Mapped[str] = mapped_column(ForeignKey('suggestions.id'), unique=True)
@@ -142,7 +161,7 @@ class Decision(Record, Base):
     decision: Mapped[str] = mapped_column(String(10))
 
 
-class CustomPrompt(Record, Base):
+class CustomPrompt(Owned, Record, Base):
     __tablename__ = 'custom_prompts'
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
@@ -150,15 +169,154 @@ class CustomPrompt(Record, Base):
     prompt_text: Mapped[str] = mapped_column(Text)
 
 
-class RetrievalRecord(Record, Base):
+class RetrievalRecord(Owned, Record, Base):
     __tablename__ = 'retrieval_records'
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
     section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
     items: Mapped[list] = mapped_column(json_type)
+    contributor_type: Mapped[str] = mapped_column(String(60), default='legacy')
+    query_text: Mapped[str] = mapped_column(Text, default='')
+    filters: Mapped[dict] = mapped_column(json_type, default=dict)
+    retriever_type: Mapped[str] = mapped_column(String(60), default='dummy_v1')
+    retrieved_item_ids: Mapped[list] = mapped_column(json_type, default=list)
+    similarity_scores: Mapped[list] = mapped_column(json_type, default=list)
+    top_k: Mapped[int] = mapped_column(Integer, default=0)
 
 
-class InteractionEvent(Record, Base):
+class SystemConfigSnapshot(Owned, Record, Base):
+    __tablename__ = 'system_config_snapshots'
+    session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), unique=True)
+    version: Mapped[int] = mapped_column(Integer)
+    config: Mapped[dict] = mapped_column(json_type)
+
+
+class LessonOverview(Owned, Record, Base):
+    __tablename__ = 'lesson_overviews'
+    session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), unique=True)
+    content: Mapped[dict] = mapped_column(json_type)
+
+
+class Conversation(Owned, Record, Base):
+    __tablename__ = 'conversations'
+    session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), unique=True)
+
+
+class ChatMessage(Owned, Record, Base):
+    __tablename__ = 'chat_messages'
+    conversation_id: Mapped[str] = mapped_column(ForeignKey('conversations.id'), index=True)
+    role: Mapped[str] = mapped_column(String(30))
+    content: Mapped[str] = mapped_column(Text)
+    message_type: Mapped[str] = mapped_column(String(40))
+    related_section_id: Mapped[str | None] = mapped_column(ForeignKey('sections.id'))
+    related_suggestion_id: Mapped[str | None] = mapped_column(ForeignKey('suggestions.id'))
+
+
+class UserPreference(Owned, Record, Base):
+    __tablename__ = 'user_preferences'
+    key: Mapped[str] = mapped_column(String(100))
+    value: Mapped[dict] = mapped_column(json_type)
+
+
+class ContextSnapshot(Owned, Record, Base):
+    __tablename__ = 'context_snapshots'
+    session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
+    round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
+    section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
+    generation_id: Mapped[str] = mapped_column(ForeignKey('generation_records.id'), unique=True)
+    current_section_version_id: Mapped[str] = mapped_column(ForeignKey('section_versions.id'))
+    contributor_names: Mapped[list] = mapped_column(json_type)
+    fragment_source_ids: Mapped[dict] = mapped_column(json_type)
+    lesson_overview_id: Mapped[str | None] = mapped_column(ForeignKey('lesson_overviews.id'))
+    related_section_ids: Mapped[list] = mapped_column(json_type)
+    memory_reference_ids: Mapped[list] = mapped_column(json_type)
+    preference_ids: Mapped[list] = mapped_column(json_type)
+    knowledge_ids: Mapped[list] = mapped_column(json_type)
+    case_ids: Mapped[list] = mapped_column(json_type)
+    prompt_version: Mapped[str] = mapped_column(String(60))
+    model_provider: Mapped[str] = mapped_column(String(60))
+    model_name: Mapped[str] = mapped_column(String(100))
+    system_config_version: Mapped[int] = mapped_column(Integer)
+    context_json: Mapped[dict] = mapped_column(json_type)
+
+
+class DatasetItem(Record, Base):
+    __tablename__ = 'dataset_items'
+    import_key: Mapped[str] = mapped_column(String(64), unique=True)
+    source_document_name: Mapped[str] = mapped_column(Text)
+    source_reference: Mapped[str] = mapped_column(Text)
+    subject: Mapped[str] = mapped_column(String(100))
+    original_grade_label: Mapped[str] = mapped_column(String(200))
+    normalized_grade: Mapped[str | None] = mapped_column(String(100))
+    topic: Mapped[str] = mapped_column(Text)
+    file_format: Mapped[str] = mapped_column(String(20))
+    raw_metadata: Mapped[dict] = mapped_column(json_type)
+    source_group: Mapped[str] = mapped_column(String(100))
+
+
+class DatasetAnnotation(Record, Base):
+    __tablename__ = 'dataset_annotations'
+    import_key: Mapped[str] = mapped_column(String(64), unique=True)
+    dataset_item_id: Mapped[str] = mapped_column(ForeignKey('dataset_items.id'))
+    source_dimension: Mapped[str] = mapped_column(Text)
+    source_location: Mapped[str] = mapped_column(Text)
+    quoted_text: Mapped[str] = mapped_column(Text)
+    evaluation: Mapped[str] = mapped_column(Text)
+    analysis: Mapped[str] = mapped_column(Text)
+    suggestion: Mapped[str] = mapped_column(Text)
+    detailed_suggestion: Mapped[str] = mapped_column(Text)
+    source_basis: Mapped[str] = mapped_column(Text)
+    theoretical_basis: Mapped[str] = mapped_column(Text)
+    teaching_method_reference: Mapped[str] = mapped_column(Text)
+    source_label: Mapped[str] = mapped_column(Text)
+    raw_payload: Mapped[dict] = mapped_column(json_type)
+    verification_status: Mapped[str] = mapped_column(String(20), default='raw')
+    __table_args__ = (CheckConstraint("verification_status IN ('raw','reviewed','verified','rejected')"),)
+
+
+class DatasetVerification(Record, Base):
+    __tablename__ = 'dataset_verifications'
+    annotation_id: Mapped[str] = mapped_column(ForeignKey('dataset_annotations.id'))
+    reviewer_user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id'))
+    issue_exists: Mapped[bool]
+    location_correct: Mapped[bool]
+    suggestion_actionable: Mapped[bool]
+    basis_supported: Mapped[bool]
+    worth_fixing: Mapped[bool]
+    notes: Mapped[str] = mapped_column(Text)
+
+
+class RetrievalAsset:
+    subject: Mapped[str] = mapped_column(String(100))
+    grade: Mapped[str | None] = mapped_column(String(100))
+    topic: Mapped[str] = mapped_column(Text)
+    section_type: Mapped[str | None] = mapped_column(String(60))
+    verification_status: Mapped[str] = mapped_column(String(20), default='raw')
+    asset_metadata: Mapped[dict] = mapped_column(json_type, default=dict)
+    embedding: Mapped[list | None] = mapped_column(json_type)
+
+
+class CaseItem(RetrievalAsset, Record, Base):
+    __tablename__ = 'case_items'
+    source_dataset_item_id: Mapped[str] = mapped_column(ForeignKey('dataset_items.id'))
+    source_annotation_id: Mapped[str] = mapped_column(ForeignKey('dataset_annotations.id'), unique=True)
+    issue_type: Mapped[str] = mapped_column(String(60), default='other')
+    original_text: Mapped[str] = mapped_column(Text)
+    issue: Mapped[str] = mapped_column(Text)
+    analysis: Mapped[str] = mapped_column(Text)
+    suggestion: Mapped[str] = mapped_column(Text)
+
+
+class KnowledgeItem(RetrievalAsset, Record, Base):
+    __tablename__ = 'knowledge_items'
+    content: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(100))
+    source_locator: Mapped[str] = mapped_column(Text)
+    pedagogical_dimension: Mapped[str | None] = mapped_column(String(100))
+
+
+class InteractionEvent(Owned, Record, Base):
     __tablename__ = 'interaction_events'
     __table_args__ = (UniqueConstraint('session_id', 'sequence'),)
     participant_id: Mapped[str] = mapped_column(ForeignKey('participants.id'))

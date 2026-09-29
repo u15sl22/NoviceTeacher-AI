@@ -76,6 +76,11 @@ test("professor demo: paste, accept/reject, refresh, next section, two rounds, t
     data.interaction_events.some((e) => e.event_type === "SECTION_VIEWED"),
   ).toBeTruthy();
   await page.screenshot({ path: "../.runtime/final.png", fullPage: true });
+  await page.getByRole("button", { name: "开始新的教案" }).click();
+  await expect(page.getByRole("heading", { name: "我的历史", exact: false })).toBeVisible();
+  const history = page.locator(".history-row").filter({ hasText: "分数的初步认识" }).first();
+  await history.getByRole("button").click();
+  await expect(page.getByRole("heading", { name: "最终教案", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

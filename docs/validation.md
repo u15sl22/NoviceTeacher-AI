@@ -1,4 +1,21 @@
-# MVP validation — 2026-09-16
+# Alpha validation — 2026-09-28
+
+## Current alpha results
+
+- Backend: **58 passed**, including user isolation, client-header impersonation prevention, legacy snapshot compatibility, contributor toggles, source verification/revocation, context budgets, safe replacements and migration constraints.
+- Browser: **2 passed** in headless Microsoft Edge against an independent mock SQLite database on port 8002. Includes two rounds, refresh recovery, accept/reject, export, history reopen and mobile network retry.
+- Production frontend build passed; bundle size advisory remains. Input/review/final/mobile screenshots saved under `.runtime/` and input layout inspected.
+- Root SQLite migrated with original rows/columns preserved, foreign key check clean, CHECK constraints retained and Alembic schema check clean. Backup: `.runtime/pre_alpha_backup.db`.
+- Imported **41 DatasetItem / 1118 raw DatasetAnnotation**, repeated import adds zero. **0 verified cases / 0 verified knowledge**; raw annotations are not eligible for retrieval.
+- Real LLM: **NOT RUN — local API key unavailable**. Run `scripts/smoke_llm.py` after configuring the key; this now covers the full alpha vertical slice using a temporary database.
+- PostgreSQL: offline SQL/JSONB migration test passed; **live PostgreSQL not tested** on this machine.
+- Two backend dependency deprecation warnings remain (Starlette/httpx and AnyIO); no failing test.
+
+See [alpha.md](alpha.md) for the complete 30-item delivery report, operation commands and limitations.
+
+---
+
+## Historical MVP validation — 2026-09-16
 
 ## Verified on this machine
 

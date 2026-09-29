@@ -43,7 +43,7 @@ class GenericLLMSuggestionProvider:
         self.client = client
         self.last_raw = None
 
-    def generate(self, session, round, section, context):
+    def generate(self, context):
         self.last_raw = self.client.complete(context)
         try:
             choice = self.last_raw['choices'][0]
