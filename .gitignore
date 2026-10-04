@@ -9,3 +9,7 @@ node_modules/
 dist/
 test-results/
 .runtime/
+.env.compose
+storage/
+backups/
+imports/

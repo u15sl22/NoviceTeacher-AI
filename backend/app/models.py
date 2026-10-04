@@ -65,6 +65,25 @@ class LessonPlan(Owned, Record, Base):
     current_content: Mapped[str] = mapped_column(Text)
 
 
+class UploadedDocument(Owned, Record, Base):
+    __tablename__ = 'uploaded_documents'
+    __table_args__ = (
+        CheckConstraint("parse_status IN ('parsed')"),
+        UniqueConstraint('storage_key'),
+        UniqueConstraint('session_id'),
+    )
+    session_id: Mapped[str | None] = mapped_column(ForeignKey('sessions.id'))
+    original_filename: Mapped[str] = mapped_column(Text)
+    storage_key: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(String(100))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    parse_status: Mapped[str] = mapped_column(String(20), default='parsed')
+    parser_name: Mapped[str] = mapped_column(String(100))
+    extracted_text: Mapped[str] = mapped_column(Text)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+
+
 class LessonPlanVersion(Owned, Record, Base):
     __tablename__ = 'lesson_plan_versions'
     __table_args__ = (UniqueConstraint('lesson_plan_id', 'round_number'),)

@@ -1,18 +1,69 @@
+name: ${COMPOSE_PROJECT_NAME:-pedagoloop}
+
+x-app: &app
+  image: pedagoloop-app:${APP_IMAGE_TAG:-local}
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_HOST: db
+    DATABASE_PORT: "5432"
+    DATABASE_NAME: ${POSTGRES_DB:-pedago_loop}
+    DATABASE_USER: ${POSTGRES_USER:-pedago}
+    DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.compose}
+    STORAGE_ROOT: /data/documents
+  volumes:
+    - documents:/data/documents
+  init: true
+
 services:
   db:
-    image: postgres:17
+    image: postgres:17-bookworm
     environment:
-      POSTGRES_DB: pedago_loop
-      POSTGRES_USER: pedago
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pedago}
-    ports:
-      - "127.0.0.1:5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-pedago_loop}
+      POSTGRES_USER: ${POSTGRES_USER:-pedago}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.compose}
     volumes:
       - pedago_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pedago -d pedago_loop"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *app
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  maintenance:
+    <<: *app
+    profiles: [tools]
+    volumes:
+      - documents:/data/documents
+      - ./imports:/imports:ro
+    command: ["python", "--version"]
+
 volumes:
   pedago_data:
+  documents:

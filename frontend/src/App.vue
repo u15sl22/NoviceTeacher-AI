@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { request } from "./api";
+import { request, uploadDocument } from "./api";
 import { sample } from "./sample";
 
 const state = ref(null),
@@ -10,6 +10,7 @@ const state = ref(null),
   error = ref(""),
   booting = ref(true);
 const form = ref({ subject: "数学", grade: "三年级", topic: "", content: "" });
+const fileInput = ref(null), uploadedDocument = ref(null), documentBusy = ref(false);
 const savedId = ref(
   new URLSearchParams(location.search).get("session") ||
     localStorage.getItem("pedago.session") ||
@@ -109,12 +110,41 @@ async function recover(id = savedId.value) {
   });
 }
 function useSample() {
+  uploadedDocument.value = null;
   form.value = {
     subject: "数学",
     grade: "三年级",
     topic: "分数的初步认识",
     content: sample,
   };
+}
+async function selectDocument(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  const suffix = file.name.toLowerCase().split(".").pop();
+  if (!["docx", "pdf"].includes(suffix)) {
+    error.value = "请选择 .docx 或 .pdf 文件。";
+    return;
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    error.value = "文件超过 15 MB 限制。";
+    return;
+  }
+  documentBusy.value = true;
+  error.value = "";
+  try {
+    const parsed = await uploadDocument(file);
+    uploadedDocument.value = parsed;
+    form.value.content = parsed.text;
+    if (!form.value.topic.trim())
+      form.value.topic = parsed.filename.replace(/\.(docx|pdf)$/i, "");
+    ElMessage.success("文件已保存，正文已提取，请确认后开始修订");
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    documentBusy.value = false;
+  }
 }
 async function start() {
   if (Object.values(form.value).some((v) => !v.trim())) {
@@ -136,6 +166,7 @@ async function start() {
           topic: form.value.topic,
         },
         content: form.value.content,
+        document_id: uploadedDocument.value?.id || null,
       };
       localStorage.setItem("pedago.pending-key", pendingKey.value);
       localStorage.setItem("pedago.pending-payload", JSON.stringify(payload));
@@ -157,6 +188,7 @@ function newLesson() {
   state.value = null;
   selectedVersion.value = null;
   error.value = "";
+  uploadedDocument.value = null;
   history.replaceState(null, "", location.pathname);
   run(loadHistory);
 }
@@ -185,6 +217,7 @@ onMounted(async () => {
     try {
       const p = JSON.parse(pending);
       form.value = { ...p.metadata, content: p.content };
+      if (p.document_id) uploadedDocument.value = { id: p.document_id, filename: "已上传的源文件" };
     } catch {
       /* keep normal form */
     }
@@ -296,6 +329,37 @@ onMounted(async () => {
                   placeholder="例如：分数的初步认识"
                   aria-label="课题"
               /></el-form-item>
+              <div class="document-upload">
+                <input
+                  ref="fileInput"
+                  class="visually-hidden"
+                  type="file"
+                  accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  @change="selectDocument"
+                />
+                <div>
+                  <strong>从 Word / PDF 导入</strong>
+                  <p class="muted">支持 DOCX 和文本型 PDF，最大 15 MB。扫描版 PDF 需要先做 OCR。</p>
+                </div>
+                <el-button
+                  :loading="documentBusy"
+                  :disabled="busy || !!pendingKey"
+                  @click="fileInput?.click()"
+                >选择文件</el-button>
+              </div>
+              <div v-if="uploadedDocument" class="document-result">
+                <div>
+                  <strong>{{ uploadedDocument.filename }}</strong>
+                  <p class="muted">
+                    已安全保存<span v-if="uploadedDocument.char_count"> · 提取 {{ uploadedDocument.char_count }} 字</span><span v-if="uploadedDocument.page_count"> · {{ uploadedDocument.page_count }} 页</span> · 可在下方校对正文
+                  </p>
+                </div>
+                <a
+                  v-if="uploadedDocument.id && uploadedDocument.filename !== '已上传的源文件'"
+                  :href="'/api/documents/' + uploadedDocument.id + '/download'"
+                  download
+                >下载原文件</a>
+              </div>
               <el-form-item label="教案正文"
                 ><el-input
                   v-model="form.content"
@@ -311,11 +375,12 @@ onMounted(async () => {
               有一份待确认的提交，重试会使用原提交编号，避免创建重复会话。
             </p>
             <div class="panel-footer">
-              <span class="muted">自动识别教学单元 · 支持纯文本</span
+              <span class="muted">自动识别教学单元 · 支持粘贴文本、DOCX、文本型 PDF</span
               ><el-button
                 type="primary"
                 size="large"
-                :loading="busy"
+                :loading="busy || documentBusy"
+                :disabled="documentBusy"
                 @click="start"
                 >{{ pendingKey ? "重试原提交" : "开始修订" }} →</el-button
               >
@@ -395,6 +460,11 @@ onMounted(async () => {
             </p>
           </div>
           <div class="toolbar">
+            <a
+              v-if="state.source_document"
+              :href="'/api/documents/' + state.source_document.id + '/download'"
+              download
+            >下载源文件</a>
             <el-button @click="copyLink">复制恢复链接</el-button
             ><el-button :disabled="busy" @click="recover()"
               >恢复最新状态</el-button

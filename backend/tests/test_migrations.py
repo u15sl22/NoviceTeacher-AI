@@ -13,7 +13,8 @@ def test_sqlite_migration_upgrade_and_schema(tmp_path, monkeypatch):
     command.upgrade(cfg, 'head')
     command.upgrade(cfg, 'head')
     engine = make_engine(settings.database_url)
-    assert {'sessions', 'decisions', 'generation_records', 'interaction_events'} <= set(inspect(engine).get_table_names())
+    assert {'sessions', 'decisions', 'generation_records', 'interaction_events',
+            'uploaded_documents'} <= set(inspect(engine).get_table_names())
     assert len(inspect(engine).get_check_constraints('sessions')) == 1
     assert len(inspect(engine).get_check_constraints('rounds')) == 2
     assert len(inspect(engine).get_check_constraints('decisions')) == 1

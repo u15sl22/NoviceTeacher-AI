@@ -1,0 +1,16 @@
+**
+!Dockerfile
+!compose.yaml
+!backend/
+!backend/**
+!scripts/
+!scripts/**
+!frontend/
+!frontend/**
+**/__pycache__/
+**/node_modules/
+**/dist/
+**/test-results/
+**/*.db
+**/*.log
+**/.env*

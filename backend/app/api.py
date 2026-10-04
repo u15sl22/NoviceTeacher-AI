@@ -1,8 +1,10 @@
 from contextlib import contextmanager
+import hashlib
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text, select, func
@@ -13,13 +15,16 @@ from .schemas import CreateSession, Decide, ReviewTarget, ViewAck
 from .providers.config import ExperimentConfigFactory
 from .workflow import Workflow, WorkflowError
 from .auth import AUTH_PROVIDERS
+from .documents import DocumentParseError, parse_document
+from .storage import LocalDocumentStorage
 from . import models as m
 
 
-def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=None):
+def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=None, document_storage=None):
     app = FastAPI(title='PedagoLoop', version='0.2.0-alpha')
     factory = config_factory or ExperimentConfigFactory(settings)
     auth = auth_provider or AUTH_PROVIDERS[factory.settings.auth_provider](factory.settings)
+    document_store = document_storage or LocalDocumentStorage(factory.settings.storage_root)
 
     @contextmanager
     def transaction(request):
@@ -62,6 +67,61 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
     def history(request: Request):
         with transaction(request) as w:
             return w.list_sessions()
+
+    @app.post('/api/documents')
+    async def upload_document(request: Request, filename: str):
+        name = filename.replace('\\', '/').rsplit('/', 1)[-1].strip()
+        if not name or len(name) > 255 or '\x00' in name:
+            raise HTTPException(422, '文件名无效。')
+        length = request.headers.get('content-length')
+        if length:
+            try:
+                if int(length) > factory.settings.max_document_bytes:
+                    raise HTTPException(413, '文件超过 15 MB 限制。')
+            except ValueError:
+                raise HTTPException(400, 'Content-Length 无效。')
+        content = await request.body()
+        if not content:
+            raise HTTPException(422, '文件不能为空。')
+        if len(content) > factory.settings.max_document_bytes:
+            raise HTTPException(413, '文件超过 15 MB 限制。')
+        try:
+            parsed = parse_document(content, name)
+        except DocumentParseError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        suffix = Path(name).suffix.lower()
+        key = document_store.put(content, suffix)
+        try:
+            with transaction(request) as w:
+                document = w.add(m.UploadedDocument, original_filename=name, storage_key=key,
+                    media_type=parsed.media_type, byte_size=len(content),
+                    sha256=hashlib.sha256(content).hexdigest(), parse_status='parsed',
+                    parser_name=parsed.parser_name, extracted_text=parsed.text,
+                    page_count=parsed.page_count)
+                result = {'id': document.id, 'filename': document.original_filename,
+                    'media_type': document.media_type, 'byte_size': document.byte_size,
+                    'sha256': document.sha256, 'parser_name': document.parser_name,
+                    'page_count': document.page_count, 'text': document.extracted_text,
+                    'char_count': len(document.extracted_text)}
+        except Exception:
+            document_store.delete(key)
+            raise
+        return result
+
+    @app.get('/api/documents/{document_id}/download')
+    def download_document(request: Request, document_id: UUID):
+        with transaction(request) as w:
+            document = w.one(m.UploadedDocument, id=str(document_id))
+            if not document:
+                raise WorkflowError('找不到此源文件。', 404)
+            try:
+                content = document_store.read(document.storage_key)
+            except FileNotFoundError as exc:
+                raise WorkflowError('源文件存储缺失，请联系管理员检查备份。', 404) from exc
+            filename = quote(document.original_filename)
+            return Response(content, media_type=document.media_type, headers={
+                'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
+                'X-Content-Type-Options': 'nosniff'})
 
     @app.get('/api/sessions/{session_id}/chat')
     def chat(request: Request, session_id: UUID):

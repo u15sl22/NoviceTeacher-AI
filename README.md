@@ -3,7 +3,7 @@
 
 **A Knowledge-Augmented Human-AI Framework for Scaffolding Novice Teacher Lesson-Plan Revision and Professional Growth**
 
-研究型教案修订 MVP。支持真实文本输入 → 动态分段 → 0–2 条建议 → Yes/No → 单元修订 → 多轮 → 最终教案。完整保存过程，刷新后从数据库恢复。
+研究型教案修订 MVP。支持粘贴文本或上传 DOCX/文本型 PDF → 提取预览 → 动态分段 → 0–2 条建议 → Yes/No → 单元修订 → 多轮 → 最终教案。原文件、V0 和完整修订过程持久保存，刷新后从数据库恢复。
 
 ## 快速运行（Windows）
 
@@ -55,19 +55,23 @@ LLM_API_KEY=填写智谱密钥
 
 ## PostgreSQL
 
-推荐用于实际研究数据。已提供 JSONB schema 和 Alembic migration。装有 Docker 时：
+现在提供完整 Docker Compose 编排：**应用（前端静态页面＋后端）与 PostgreSQL 两个常驻容器**，另有一次性迁移任务、独立附件卷和备份恢复工具。操作细节见 **[部署与存储规范](docs/deployment.md)**。
 
 ```powershell
-docker compose up -d db
+Copy-Item .env.compose.example .env.compose
+# 先修改 .env.compose 中的数据库密码；DeepSeek 密钥仍在 .env
+docker compose --env-file .env.compose up -d --build
 ```
 
-将 `.env` 中连接改为：
+容器自动连接内部 PostgreSQL，无需改写原 `.env` 的 SQLite 配置。默认访问 http://127.0.0.1:8000 。已有 SQLite 历史不会自动搬迁，应先按照部署文档迁移到空目标，再启动应用。
+
+不使用 Docker、而连接已有 PostgreSQL 时，可设置：
 
 ```dotenv
 DATABASE_URL=postgresql+psycopg://pedago:pedago@localhost:5432/pedago_loop
 ```
 
-也可以指向已有 PostgreSQL 实例，然后执行 `scripts/start.ps1` 自动迁移。Compose 仅启动数据库，持久数据使用命名卷。SQLite 与 PostgreSQL 数据不自动互迁；开始真实研究前选定数据库并做备份。
+随后执行 `scripts/start.ps1` 自动升级表结构。SQLite 与 PostgreSQL 数据不自动同步；迁移后应选定一个作为业务数据源。当前 Docker/PostgreSQL 已完成在线构建、历史迁移和容器内回归测试。
 
 ## 开发与验证
 

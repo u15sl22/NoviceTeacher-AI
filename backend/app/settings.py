@@ -1,10 +1,27 @@
-from pydantic import Field
+from pydantic import Field, model_validator
+from sqlalchemy.engine import URL
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     database_url: str = 'sqlite:///./pedago_loop.db'
+    database_host: str | None = None
+    database_port: int = 5432
+    database_name: str = 'pedago_loop'
+    database_user: str = 'pedago'
+    database_password: str = ''
+    storage_root: Path = Path(__file__).resolve().parents[2] / 'storage' / 'documents'
+    max_document_bytes: int = Field(default=15 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+
+    @model_validator(mode='after')
+    def resolve_database(self):
+        if self.database_host:
+            self.database_url = URL.create('postgresql+psycopg', username=self.database_user,
+                password=self.database_password, host=self.database_host, port=self.database_port,
+                database=self.database_name).render_as_string(hide_password=False)
+        return self
     suggestion_provider: str = 'generic_llm'
     llm_base_url: str = 'https://api.deepseek.com'
     llm_model: str = 'deepseek-flash'

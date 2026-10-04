@@ -1,5 +1,15 @@
 # Alpha validation — 2026-09-28
 
+## Deployment/storage update — 2026-09-30
+
+- Backend suite: **71 passed** locally; container PostgreSQL suite: **70 passed, 1 skipped**.
+- Added multi-stage Dockerfile, app/PostgreSQL Compose, private database network, persistent document volume, migration and backup/restore tools.
+- Storage archive round-trip, path traversal rejection, lossless history copy and non-empty target rejection passed locally.
+- Additionally copied a read-only snapshot of the real SQLite database into a temporary SQLite target and compared every original column: **26 tables, 8 sessions, 41 dataset items, 1118 annotations** verified. This exercises copy logic with actual data, not PostgreSQL compatibility.
+- Docker image build, Compose runtime, live PostgreSQL migration, health checks and isolated PostgreSQL tests passed. A real second-host restore rehearsal remains outstanding.
+- Docker/PostgreSQL is now live; the SQLite snapshot was migrated with original identifiers and row verification. DOCX/text-PDF upload, private download, V0 linkage and the persistent document volume are implemented.
+- Current upload validation: local backend **71 passed**; container PostgreSQL **70 passed, 1 skipped**; production frontend build passed. Invalid DOCX, textless/scanned PDF, unsupported extensions, attachment reuse and source download are covered.
+
 ## Current alpha results
 
 - Backend: **58 passed**, including user isolation, client-header impersonation prevention, legacy snapshot compatibility, contributor toggles, source verification/revocation, context budgets, safe replacements and migration constraints.

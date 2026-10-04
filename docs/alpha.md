@@ -278,7 +278,7 @@ npm run test:e2e
 ## 29. Known limitations
 
 - 真实 LLM 未完成本机端到端验收：没有可用密钥；PostgreSQL 未运行在线回归。
-- 网页当前仍是纯文本输入，没有 Word/PDF 上传或 OCR；现有文件通过结构化 JSON 纳入 raw dataset。
+- 网页支持 DOCX 与文本型 PDF 上传、正文预览校对、原文件私有保存和下载；扫描 PDF/OCR 尚未实现。上传教案属于用户会话来源，不自动进入共享 Dataset/Knowledge。
 - 资料检索链路已接入，但没有人工核验资产，因此默认不会出现可信检索结果。
 - 元数据检索是基础规则排序；概览为规则摘录，分段为无损规则合并，复杂教案的教学单元质量还需试用。
 - DevelopmentAuthProvider 不是生产认证。当前模型调用仍在会话事务中；SQLite 写入串行，适合本机 internal pilot，不是高并发部署。

@@ -30,6 +30,15 @@ def dump(row):
     return {col.key: normalize(getattr(row, col.key)) for col in row.__table__.columns}
 
 
+def document_dump(row, include_text=False):
+    data = {key: getattr(row, key) for key in ('id', 'session_id', 'original_filename',
+        'media_type', 'byte_size', 'sha256', 'parse_status', 'parser_name', 'page_count',
+        'created_at')}
+    if include_text:
+        data['extracted_text'] = row.extracted_text
+    return data
+
+
 class Workflow:
     def __init__(self, db, factory, current_user):
         self.db, self.factory, self.current_user = db, factory, current_user
@@ -76,7 +85,8 @@ class Workflow:
 
     def create_session(self, data):
         payload = data.model_dump(mode='json')
-        fingerprint = hashlib.sha256(json.dumps({'metadata': payload['metadata'], 'content': data.content},
+        fingerprint = hashlib.sha256(json.dumps({'metadata': payload['metadata'], 'content': data.content,
+                                                 'document_id': payload.get('document_id')},
                                                 sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         existing = self.one(m.Session, request_key=str(data.request_key))
         if existing:
@@ -85,16 +95,29 @@ class Workflow:
             return existing
         if not data.content.strip():
             raise WorkflowError('教案不能为空。', 422)
+        document = None
+        if data.document_id:
+            document = self.one(m.UploadedDocument, id=str(data.document_id))
+            if not document:
+                raise WorkflowError('找不到已上传的源文件，请重新上传。', 404)
+            if document.session_id:
+                raise WorkflowError('此源文件已经用于另一份教案，请重新上传。')
         snapshot = self.factory.snapshot()
         participant = self.add(m.Participant)
         session = self.add(m.Session, participant_id=participant.id, request_key=str(data.request_key),
                            input_hash=fingerprint, lesson_metadata=payload['metadata'], config_snapshot=snapshot)
+        if document:
+            document.session_id = session.id
         self.add(m.SystemConfigSnapshot, session_id=session.id, version=snapshot['version'], config=snapshot)
         self.add(m.Conversation, session_id=session.id)
         self.event(session, 'SESSION_CREATED', {'config': snapshot})
         lesson = self.add(m.LessonPlan, session_id=session.id, original_content=data.content, current_content=data.content)
         original = self.add(m.LessonPlanVersion, lesson_plan_id=lesson.id, round_number=0, content=data.content)
         self.event(session, 'LESSON_PLAN_SUBMITTED', {'lesson_plan_id': lesson.id, 'version_id': original.id})
+        if document:
+            self.event(session, 'SOURCE_DOCUMENT_ATTACHED', {'document_id': document.id,
+                'filename': document.original_filename, 'sha256': document.sha256,
+                'parser': document.parser_name})
         self.chat(session, 'user', data.content, 'lesson_plan')
         drafts = self.config(session).section_parser.parse(data.content, payload['metadata'])
         if not drafts or ''.join(d.content for d in drafts) != data.content:
@@ -131,7 +154,9 @@ class Workflow:
             result.append({**dump(section), 'version': dump(self.latest(section.id)), 'review': dump(review),
                 'suggestions': [{**dump(s), 'decision': (dump(d) if (d := self.one(m.Decision, suggestion_id=s.id)) else None)}
                                  for s in suggestions]})
+        document = self.one(m.UploadedDocument, session_id=session.id)
         return {'session': dump(session), 'lesson_plan': dump(lesson), 'round': dump(round), 'sections': result,
+                'source_document': document_dump(document) if document else None,
                 'lesson_plan_versions': [dump(v) for v in sorted(self.rows(m.LessonPlanVersion, lesson_plan_id=lesson.id),
                                                                key=lambda v: v.round_number)]}
 
@@ -288,6 +313,8 @@ class Workflow:
             result[cls.__tablename__] = [dump(x) for x in self.db.scalars(query)]
         conversation = self.one(m.Conversation, session_id=session.id)
         result['chat_messages'] = [dump(x) for x in self.rows(m.ChatMessage, conversation_id=conversation.id)] if conversation else []
+        document = self.one(m.UploadedDocument, session_id=session.id)
+        result['uploaded_documents'] = [document_dump(document, include_text=True)] if document else []
         result['summary'] = {'section_count': len(section_ids), 'round_count': len(result['rounds']),
             'suggestions': len(result['suggestions']), 'accepts': sum(x['decision'] == 'ACCEPT' for x in result['decisions']),
             'rejects': sum(x['decision'] == 'REJECT' for x in result['decisions']),

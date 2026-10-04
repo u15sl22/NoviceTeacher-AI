@@ -17,6 +17,7 @@ class CreateSession(BaseModel):
     request_key: UUID
     metadata: LessonMetadata
     content: str = Field(min_length=1, max_length=100000)
+    document_id: UUID | None = None
 
 
 class Decide(BaseModel):
