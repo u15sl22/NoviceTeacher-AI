@@ -86,7 +86,8 @@ class Workflow:
     def create_session(self, data):
         payload = data.model_dump(mode='json')
         fingerprint = hashlib.sha256(json.dumps({'metadata': payload['metadata'], 'content': data.content,
-                                                 'document_id': payload.get('document_id')},
+                                                 'document_id': payload.get('document_id'),
+                                                 'model_profile': payload.get('model_profile')},
                                                 sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         existing = self.one(m.Session, request_key=str(data.request_key))
         if existing:
@@ -102,7 +103,10 @@ class Workflow:
                 raise WorkflowError('找不到已上传的源文件，请重新上传。', 404)
             if document.session_id:
                 raise WorkflowError('此源文件已经用于另一份教案，请重新上传。')
-        snapshot = self.factory.snapshot()
+        try:
+            snapshot = self.factory.snapshot(data.model_profile)
+        except ValueError as exc:
+            raise WorkflowError(str(exc), 422) from exc
         participant = self.add(m.Participant)
         session = self.add(m.Session, participant_id=participant.id, request_key=str(data.request_key),
                            input_hash=fingerprint, lesson_metadata=payload['metadata'], config_snapshot=snapshot)

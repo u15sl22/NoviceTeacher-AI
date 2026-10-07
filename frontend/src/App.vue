@@ -9,7 +9,7 @@ const state = ref(null),
   busy = ref(false),
   error = ref(""),
   booting = ref(true);
-const form = ref({ subject: "数学", grade: "三年级", topic: "", content: "" });
+const form = ref({ subject: "数学", grade: "三年级", topic: "", content: "", model_profile: "" });
 const fileInput = ref(null), uploadedDocument = ref(null), documentBusy = ref(false);
 const savedId = ref(
   new URLSearchParams(location.search).get("session") ||
@@ -24,6 +24,9 @@ async function loadHistory() {
   currentUser.value = await request('/me');
   mySessions.value = await request('/sessions');
   capabilities.value = await request('/capabilities');
+  if (!form.value.model_profile) {
+    form.value.model_profile = capabilities.value.model_profiles?.find((item) => item.default)?.id || "";
+  }
 }
 const current = computed(() =>
   state.value?.sections.find(
@@ -34,6 +37,14 @@ const status = computed(() => state.value?.session.status);
 const provider = computed(
   () => state.value?.session.config_snapshot.provider || health.value?.provider,
 );
+const modelLabel = computed(() => {
+  if (state.value?.session.config_snapshot.model_label)
+    return state.value.session.config_snapshot.model_label;
+  const profile = capabilities.value?.model_profiles?.find(
+    (item) => item.id === form.value.model_profile,
+  );
+  return profile?.label || (provider.value === "mock" ? "模拟演示" : "Generic AI");
+});
 const maxRounds = computed(
   () => state.value?.session.config_snapshot.max_rounds || 5,
 );
@@ -111,11 +122,13 @@ async function recover(id = savedId.value) {
 }
 function useSample() {
   uploadedDocument.value = null;
+  const model_profile = form.value.model_profile;
   form.value = {
     subject: "数学",
     grade: "三年级",
     topic: "分数的初步认识",
     content: sample,
+    model_profile,
   };
 }
 async function selectDocument(event) {
@@ -167,6 +180,7 @@ async function start() {
         },
         content: form.value.content,
         document_id: uploadedDocument.value?.id || null,
+        model_profile: form.value.model_profile || null,
       };
       localStorage.setItem("pedago.pending-key", pendingKey.value);
       localStorage.setItem("pedago.pending-payload", JSON.stringify(payload));
@@ -216,7 +230,7 @@ onMounted(async () => {
   if (pending) {
     try {
       const p = JSON.parse(pending);
-      form.value = { ...p.metadata, content: p.content };
+      form.value = { ...p.metadata, content: p.content, model_profile: p.model_profile || "" };
       if (p.document_id) uploadedDocument.value = { id: p.document_id, filename: "已上传的源文件" };
     } catch {
       /* keep normal form */
@@ -249,7 +263,7 @@ onMounted(async () => {
             provider === "mock"
               ? "模拟演示 · 非真实 AI"
               : provider === "generic_llm"
-                ? "Generic AI"
+                ? modelLabel
                 : "连接中"
           }}</el-tag
         >
@@ -329,6 +343,18 @@ onMounted(async () => {
                   placeholder="例如：分数的初步认识"
                   aria-label="课题"
               /></el-form-item>
+              <el-form-item v-if="capabilities?.model_profiles?.length" label="本次修订使用的模型">
+                <el-select v-model="form.model_profile" style="width:100%" aria-label="模型选择">
+                  <el-option
+                    v-for="item in capabilities.model_profiles"
+                    :key="item.id"
+                    :value="item.id"
+                    :label="`${item.label} · ${item.model}${item.configured ? '' : '（未配置密钥）'}`"
+                    :disabled="!item.configured"
+                  />
+                </el-select>
+                <p class="muted model-help">模型在会话创建后固定；切换配置不会改变已有会话。</p>
+              </el-form-item>
               <div class="document-upload">
                 <input
                   ref="fileInput"
@@ -434,7 +460,7 @@ onMounted(async () => {
           <h3>我的历史 <span class="muted">{{ currentUser?.username }}</span></h3>
           <p v-if="!mySessions.length" class="muted">当前用户还没有修订记录。</p>
           <div v-for="item in mySessions" :key="item.id" class="history-row">
-            <div><strong>{{ item.lesson_metadata.topic }}</strong><p class="muted">{{ item.lesson_metadata.subject }} · {{ item.lesson_metadata.grade }} · {{ { CREATED: '已创建', ACTIVE: '修订中', ROUND_COMPLETED: '本轮已完成', TERMINATED: '已结束' }[item.status] || item.status }} · {{ new Date(item.updated_at).toLocaleString() }}</p></div>
+            <div><strong>{{ item.lesson_metadata.topic }}</strong><p class="muted">{{ item.lesson_metadata.subject }} · {{ item.lesson_metadata.grade }} · {{ item.config_snapshot.model_label || item.config_snapshot.model }} · {{ { CREATED: '已创建', ACTIVE: '修订中', ROUND_COMPLETED: '本轮已完成', TERMINATED: '已结束' }[item.status] || item.status }} · {{ new Date(item.updated_at).toLocaleString() }}</p></div>
             <el-button :disabled="busy" @click="recover(item.id)">查看 / 继续</el-button>
           </div>
         </section>
@@ -456,7 +482,7 @@ onMounted(async () => {
                   : status === "ROUND_COMPLETED"
                     ? "本轮已完成"
                     : "逐节修订中"
-              }}
+              }} · {{ state.session.config_snapshot.model_label || state.session.config_snapshot.model }}
             </p>
           </div>
           <div class="toolbar">

@@ -231,6 +231,10 @@ h3 {
   font-size: 12px;
   font-weight: 600;
 }
+.model-help {
+  width: 100%;
+  margin: 7px 0 0;
+}
 .el-form-item__label {
   font-weight: 550;
   font-size: 12px !important;

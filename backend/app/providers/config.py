@@ -44,18 +44,28 @@ class ExperimentConfigFactory:
     def __init__(self, settings, registry=None):
         self.settings, self.registry = settings, registry or default_registry()
 
-    def snapshot(self):
+    def public_profiles(self):
+        cfg = self.settings
+        default = cfg.default_profile_id()
+        return [{'id': profile.id, 'label': profile.label, 'provider': profile.provider,
+            'model': profile.model, 'configured': bool(cfg.api_key_for(profile.id)),
+            'default': profile.id == default} for profile in cfg.model_profiles()]
+
+    def snapshot(self, profile_id=None):
         cfg = self.settings
         if cfg.suggestion_provider not in ('mock', 'generic_llm'): raise ValueError('Unknown suggestion provider')
-        if set(cfg.llm_extra_body) - {'thinking', 'max_tokens', 'temperature', 'top_p', 'reasoning_effort'}:
+        profile = cfg.resolve_profile(profile_id)
+        extra_body = profile.extra_body or cfg.llm_extra_body
+        if set(extra_body) - {'thinking', 'max_tokens', 'temperature', 'top_p', 'reasoning_effort'}:
             raise ValueError('Unsupported model generation parameters')
         if len(cfg.context_contributors) != len(set(cfg.context_contributors)):
             raise ValueError('Duplicate contributors')
         for name in cfg.context_contributors:
             if name not in self.registry.factories: raise ValueError('Unknown contributor: ' + name)
         return {'name': 'ALPHA_CONFIG', 'version': 2, 'provider': cfg.suggestion_provider,
-            'model_provider': cfg.llm_provider, 'model': cfg.llm_model, 'base_url': cfg.llm_base_url,
-            'extra_body': cfg.llm_extra_body, 'timeout': cfg.llm_timeout_seconds,
+            'model_profile': profile.id, 'model_label': profile.label,
+            'model_provider': profile.provider, 'model': profile.model, 'base_url': profile.base_url,
+            'extra_body': extra_body, 'timeout': profile.timeout or cfg.llm_timeout_seconds,
             'context_contributors': list(cfg.context_contributors), 'max_context_tokens': cfg.max_context_tokens,
             'section_parser': cfg.section_parser, 'revision': cfg.revision_strategy, 'memory': cfg.memory_provider,
             'case_retriever': cfg.case_retriever, 'knowledge_retriever': cfg.knowledge_retriever,
@@ -65,7 +75,8 @@ class ExperimentConfigFactory:
     def build(self, snapshot, history_reader):
         providers = {'mock': lambda: ContextOnlyMockProvider(),
             'generic_llm': lambda: GenericLLMSuggestionProvider(CompatibleLLMClient(snapshot['base_url'],
-                snapshot['model'], self.settings.llm_api_key, snapshot.get('timeout', self.settings.llm_timeout_seconds),
+                snapshot['model'], self.settings.api_key_for(snapshot.get('model_profile', ''), snapshot),
+                snapshot.get('timeout', self.settings.llm_timeout_seconds),
                 extra_body=snapshot.get('extra_body', {})))}
         provider = providers[snapshot['provider']]()
         if snapshot['version'] == 1:

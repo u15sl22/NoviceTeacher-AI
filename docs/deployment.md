@@ -99,8 +99,9 @@ docker compose --env-file .env.compose config --quiet
 docker compose --env-file .env.compose build
 docker compose --env-file .env.compose up -d --wait
 docker compose --env-file .env.compose run --rm maintenance python scripts/test_postgres.py
+docker compose --env-file .env.compose run --rm maintenance python scripts/smoke_llm.py --postgres --profile deepseek
 ```
 
-PostgreSQL 测试在独立随机 schema 中运行并清理，不删除业务 schema。还须人工验证：新建并修订 → 重建 app 后恢复 → 备份 → 新项目恢复 → 对比历史和附件。首次真实跨库迁移需核对脚本的逐表输出以及应用页面。
+PostgreSQL 测试和真实模型 smoke 均在独立随机 schema 中运行并清理，不删除业务 schema。真实模型命令会产生供应商 API 用量，并要求至少生成一条建议。还须人工验证：新建并修订 → 重建 app 后恢复 → 备份 → 新项目恢复 → 对比历史和附件。首次真实跨库迁移需核对脚本的逐表输出以及应用页面。
 
 部署默认仅绑定 `127.0.0.1`，数据库不发布宿主端口。当前仍使用 DevelopmentAuthProvider；容器化没有增加登录。未来公网部署还需 HTTPS、真实认证、反向代理与备份计划。本次不安装 Docker、不开放公网、不启动云资源。

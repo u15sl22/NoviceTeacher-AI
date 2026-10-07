@@ -27,6 +27,10 @@ LLM_MODEL=deepseek-flash
 LLM_API_KEY=填写你自己的密钥
 LLM_TIMEOUT_SECONDS=45
 LLM_EXTRA_BODY={"thinking":{"type":"disabled"},"max_tokens":2048}
+LLM_PROFILES=[{"id":"deepseek","label":"DeepSeek","provider":"deepseek","base_url":"https://api.deepseek.com","model":"deepseek-flash","extra_body":{"thinking":{"type":"disabled"},"max_tokens":2048}},{"id":"zhipu","label":"智谱 GLM","provider":"zhipu","base_url":"https://open.bigmodel.cn/api/paas/v4","model":"glm-4.7-flash","extra_body":{"max_tokens":2048}}]
+DEFAULT_LLM_PROFILE=deepseek
+ZHIPU_API_KEY=
+LLM_API_KEYS={}
 ```
 
 ```powershell
@@ -34,22 +38,19 @@ LLM_EXTRA_BODY={"thinking":{"type":"disabled"},"max_tokens":2048}
 ./scripts/start.ps1
 ```
 
-`smoke_llm.py` 会实际发送一个数学教案片段，验证真实服务的 JSON 和建议数量。密钥仅留在服务器环境变量，不进入浏览器、配置快照、Git 或日志。缺少密钥、网络错误和超时会明确报错，不会自动回退 Mock。
+`smoke_llm.py` 会实际发送一个数学教案片段，要求至少生成并处理一条建议，验证真实服务、决策、版本与导出。Docker/PostgreSQL 验收使用 `docker compose --env-file .env.compose run --rm maintenance python scripts/smoke_llm.py --postgres --profile deepseek`；临时 schema 会自动删除。密钥仅留在服务器环境变量，不进入浏览器、配置快照、Git 或日志。缺少密钥、网络错误和超时会明确报错，不会自动回退 Mock。
 
-**切换服务需要重启后端并新建会话**。既有会话继续使用创建时保存的模型、URL 和策略快照，避免实验条件漂移；服务密钥从当前服务器配置读取。未来同时运行多个供应商时，应注入按供应商解析密钥的实现。
+输入页可以为新教案选择已配置的模型。既有会话继续使用创建时保存的 profile、模型、URL 和策略快照，避免实验条件漂移；密钥始终由服务器按 profile ID 解析。修改服务器 profile 或密钥后需要重启应用。
 
-### 智谱：只改配置
+### 智谱和其他兼容模型
 
 参考 `.env.zhipu.example`：
 
 ```dotenv
-SUGGESTION_PROVIDER=generic_llm
-LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
-LLM_MODEL=glm-4.7-flash
-LLM_API_KEY=填写智谱密钥
+ZHIPU_API_KEY=填写智谱密钥
 ```
 
-两者共用 `GenericLLMSuggestionProvider` → `CompatibleLLMClient`。模型名、URL 均在配置层，核心流程不出现 DeepSeek / 智谱分支。可填写账号实际可用的其他兼容模型。
+重启后，输入页即可在 DeepSeek 与智谱之间选择。增加其他 Chat Completions 兼容服务时，在 `LLM_PROFILES` 添加 profile，并在 `LLM_API_KEYS` 以 profile ID 配置密钥，例如 `{"my_model":"填写密钥"}`。两者共用 `GenericLLMSuggestionProvider` → `CompatibleLLMClient`，核心流程不写死供应商。
 
 接口依据：[DeepSeek 首次调用](https://api-docs.deepseek.com/)、[DeepSeek JSON 输出](https://api-docs.deepseek.com/guides/json_mode)、[智谱对话补全](https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E5%AF%B9%E8%AF%9D%E8%A1%A5%E5%85%A8)。配置示例核对日期：2026-09-16。
 

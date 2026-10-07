@@ -43,10 +43,13 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
 
     @app.get('/api/health')
     def health():
+        profiles = factory.public_profiles()
         with session_factory() as db:
             db.execute(text('SELECT 1'))
         return {'status': 'ok', 'provider': factory.settings.suggestion_provider,
-                'llm_configured': bool(factory.settings.llm_api_key), 'max_rounds': 5}
+                'llm_configured': any(item['configured'] for item in profiles),
+                'default_model_profile': next(item['id'] for item in profiles if item['default']),
+                'max_rounds': 5}
 
     @app.get('/api/me')
     def me(request: Request):
@@ -57,6 +60,7 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
     def capabilities(request: Request):
         with transaction(request) as w:
             return {'contributors': factory.settings.context_contributors,
+                'model_profiles': factory.public_profiles(),
                 'verified_cases': w.db.scalar(select(func.count()).select_from(m.CaseItem).join(m.DatasetAnnotation,
                     m.CaseItem.source_annotation_id == m.DatasetAnnotation.id).where(m.CaseItem.verification_status == 'verified',
                         m.DatasetAnnotation.verification_status == 'verified')),

@@ -8,6 +8,8 @@ from app.providers.defaults import (DefaultSectionParser, DummyKnowledgeRetrieve
     DefaultContextBuilder, MockSuggestionProvider, DisabledInquiryProvider, DefaultRevisionStrategy)
 from app.providers.interfaces import SuggestionDraft
 from app.providers.llm import GenericLLMSuggestionProvider, CompatibleLLMClient, ProviderError
+from app.providers.config import ExperimentConfigFactory
+from app.settings import Settings
 from test_workflow import create, current, target, post, finish_round
 
 
@@ -122,6 +124,53 @@ def test_config_snapshot_survives_server_provider_change(client, environment):
     factory.settings.suggestion_provider = 'generic_llm'
     generated = post(client, state, '/suggestions', target(state))
     assert current(generated)['suggestions'][0]['provider_type'] == 'mock'
+
+
+def test_model_profiles_are_selectable_frozen_and_secrets_stay_server_side(environment):
+    sessions, _ = environment
+    settings = Settings(_env_file=None, suggestion_provider='generic_llm',
+        llm_provider='deepseek', llm_api_key='deep-secret', zhipu_api_key='zhipu-secret',
+        default_llm_profile='deepseek', context_contributors=[], llm_profiles=[
+            {'id':'deepseek','label':'DeepSeek','provider':'deepseek',
+             'base_url':'https://api.deepseek.com','model':'deepseek-chat'},
+            {'id':'zhipu','label':'智谱 GLM','provider':'zhipu',
+             'base_url':'https://open.bigmodel.cn/api/paas/v4','model':'glm-test'},
+            {'id':'other','label':'Other','provider':'compatible',
+             'base_url':'https://model.example/v1','model':'other-model'}])
+    factory = ExperimentConfigFactory(settings)
+    with TestClient(create_app(sessions, factory)) as client:
+        capabilities = client.get('/api/capabilities')
+        assert capabilities.status_code == 200
+        profiles = capabilities.json()['model_profiles']
+        assert [(x['id'], x['configured']) for x in profiles] == [
+            ('deepseek', True), ('zhipu', True), ('other', False)]
+        assert 'secret' not in capabilities.text
+        request_key = '11111111-1111-4111-8111-111111111111'
+        payload = {'request_key':request_key, 'metadata': {
+            'subject':'数学','grade':'三年级','topic':'分数'}, 'content':'完整教案',
+            'model_profile':'zhipu'}
+        state = client.post('/api/sessions', json=payload).json()
+        snapshot = state['session']['config_snapshot']
+        assert snapshot['model_profile'] == 'zhipu'
+        assert snapshot['model_label'] == '智谱 GLM'
+        assert snapshot['model'] == 'glm-test'
+        assert 'secret' not in json.dumps(snapshot)
+        assert client.post('/api/sessions', json={**payload, 'model_profile':'deepseek'}).status_code == 409
+        assert client.post('/api/sessions', json={**payload, 'request_key':'22222222-2222-4222-8222-222222222222',
+            'model_profile':'missing'}).status_code == 422
+
+
+def test_additional_profile_key_mapping():
+    settings = Settings(_env_file=None, suggestion_provider='generic_llm', context_contributors=[],
+        default_llm_profile='other', llm_api_keys={'other':'other-secret'}, llm_profiles=[{
+            'id':'other','label':'Other','provider':'compatible',
+            'base_url':'https://model.example/v1','model':'other-model'}])
+    factory = ExperimentConfigFactory(settings)
+    assert factory.public_profiles() == [{'id':'other','label':'Other','provider':'compatible',
+        'model':'other-model','configured':True,'default':True}]
+    snapshot = factory.snapshot('other')
+    assert settings.api_key_for('other', snapshot) == 'other-secret'
+    assert 'other-secret' not in json.dumps(snapshot)
 
 
 def test_one_and_zero_suggestions_complete_round(environment):

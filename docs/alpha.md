@@ -233,7 +233,7 @@ JSON 是对象数组；必填 content/source/source_type/source_locator/subject/
 
 current_user → Workflow → Pipeline → Contributors → Assembler → GenerationAudit.started → GenericLLMSuggestionProvider → CompatibleLLMClient → Chat Completions → JSON/数量/字段/引用校验 → Suggestion + ContextSnapshot → Decision → Revision → Version。
 
-`.env` 中设置 SUGGESTION_PROVIDER=generic_llm、LLM_PROVIDER=deepseek、LLM_BASE_URL、LLM_MODEL、LLM_API_KEY。默认演示配置沿用 DeepSeek；智谱按 `.env.zhipu.example` 配置，核心无供应商分支。实际模型以账号可用型号为准。密钥不进入浏览器、会话快照或研究日志；单进程当前仅配置一套密钥，切供应商后旧会话仍绑定旧 URL/型号，不能保证用新密钥继续调用旧供应商。
+`.env` 中以 `LLM_PROFILES` 声明可选模型，以 `DEFAULT_LLM_PROFILE` 选择默认项。DeepSeek 沿用 `LLM_API_KEY`，智谱使用 `ZHIPU_API_KEY`，其他兼容服务使用按 profile ID 映射的 `LLM_API_KEYS`。输入页只允许选择已配置密钥的 profile；新会话保存 profile、模型、URL 和策略快照，旧会话不随服务器默认项变化。密钥不进入浏览器、会话快照或研究日志。
 
 ## 24. 跑一次 Alpha
 
@@ -246,7 +246,7 @@ current_user → Workflow → Pipeline → Contributors → Assembler → Genera
 
 访问 http://127.0.0.1:8000；粘贴教案或填入示例 → 开始修订 → 生成建议 → 采纳/拒绝 → 下一单元 → 完成本轮 → 继续或结束 → 查看历史/导出。替换目标必须在当前正文唯一匹配；否则不改正文，展示候选，用户可明确确认为追加，提交时再次检查版本。
 
-配置好密钥后运行 `./.venv/Scripts/python.exe scripts/smoke_llm.py`。此脚本用临时数据库跑真实模型、接受/拒绝、结束与导出，报告写入 `.runtime/real-alpha-smoke.json`；会向配置的模型服务发送内置数学示例。成功后可运行 `./scripts/start.ps1` 做人工验收。关闭应用：在启动窗口按 Ctrl+C；仅关闭网页不会停止服务。
+配置好密钥后运行 `./.venv/Scripts/python.exe scripts/smoke_llm.py --profile deepseek`。此脚本用临时数据库跑真实模型、接受/拒绝、结束与导出，且至少需要一条真实建议才算通过；会向配置的模型服务发送内置数学示例。PostgreSQL 可使用 `docker compose --env-file .env.compose run --rm maintenance python scripts/smoke_llm.py --postgres --profile deepseek`，测试 schema 自动清理。关闭本机脚本应用时在启动窗口按 Ctrl+C；仅关闭网页不会停止服务。
 
 ## 25. 当前用户历史
 
@@ -277,7 +277,7 @@ npm run test:e2e
 
 ## 29. Known limitations
 
-- 真实 LLM 未完成本机端到端验收：没有可用密钥；PostgreSQL 未运行在线回归。
+- 2026-10-07 已用 DeepSeek `deepseek-flash` 在一次性 PostgreSQL schema 完成真实建议、决策、结束和导出验收；本次得到 1 条建议。该结果证明链路可用，不等于教学质量已经通过专家评审。
 - 网页支持 DOCX 与文本型 PDF 上传、正文预览校对、原文件私有保存和下载；扫描 PDF/OCR 尚未实现。上传教案属于用户会话来源，不自动进入共享 Dataset/Knowledge。
 - 资料检索链路已接入，但没有人工核验资产，因此默认不会出现可信检索结果。
 - 元数据检索是基础规则排序；概览为规则摘录，分段为无损规则合并，复杂教案的教学单元质量还需试用。
