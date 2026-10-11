@@ -57,6 +57,12 @@ def test_compose_uses_private_database_and_persistent_volumes():
     assert config['services']['app']['environment']['DATABASE_HOST'] == 'db'
     assert config['services']['app']['depends_on']['migrate']['condition'] == 'service_completed_successfully'
     assert config['services']['app']['volumes'] == ['documents:/data/documents']
+    assert config['services']['worker']['command'] == ['python', '-m', 'app.worker']
+    assert config['services']['worker']['depends_on']['migrate']['condition'] == 'service_completed_successfully'
+    assert config['services']['worker'].get('ports') == []
+    assert config['services']['ocr-worker']['command'] == ['python', '-m', 'app.ocr_worker']
+    assert config['services']['ocr-worker']['depends_on']['migrate']['condition'] == 'service_completed_successfully'
+    assert config['services']['ocr-worker'].get('ports') == []
 
 
 def test_database_configuration_escapes_password():

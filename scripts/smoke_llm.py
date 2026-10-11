@@ -15,6 +15,7 @@ from app.models import Base
 from app.db import make_engine
 from app.api import create_app
 from app.providers.config import ExperimentConfigFactory
+from app.worker import GenerationWorker
 
 
 def run(sessions, factory, profile_id):
@@ -28,9 +29,10 @@ def run(sessions, factory, profile_id):
         path = '/api/sessions/' + state['session']['id']
         target = {'round_id':state['round']['id'], 'section_id':state['session']['current_section_id']}
         response = client.post(path + '/suggestions', json=target)
-        if response.status_code != 200:
+        if response.status_code != 202:
             print('FAIL:', response.json()); raise SystemExit(1)
-        state = response.json()
+        assert GenerationWorker(sessions, factory).run_once()
+        state = client.get(path + '/current-state').json()
         generated = state['sections'][0]['suggestions']
         if not generated:
             raise AssertionError('The real model returned zero suggestions; no revision was validated.')

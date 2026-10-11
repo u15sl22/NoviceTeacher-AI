@@ -62,11 +62,14 @@ class ExperimentConfigFactory:
             raise ValueError('Duplicate contributors')
         for name in cfg.context_contributors:
             if name not in self.registry.factories: raise ValueError('Unknown contributor: ' + name)
-        return {'name': 'ALPHA_CONFIG', 'version': 2, 'provider': cfg.suggestion_provider,
+        return {'name': 'ALPHA_CONFIG', 'version': 3, 'provider': cfg.suggestion_provider,
             'model_profile': profile.id, 'model_label': profile.label,
             'model_provider': profile.provider, 'model': profile.model, 'base_url': profile.base_url,
             'extra_body': extra_body, 'timeout': profile.timeout or cfg.llm_timeout_seconds,
-            'context_contributors': list(cfg.context_contributors), 'max_context_tokens': cfg.max_context_tokens,
+            'context_contributors': list(cfg.context_contributors),
+            'max_context_bytes': cfg.context_budget_bytes(), 'context_budget_unit': 'utf8_bytes',
+            'max_analysis_chunks_per_section': cfg.max_analysis_chunks_per_section,
+            'max_analysis_chunks_per_lesson': cfg.max_analysis_chunks_per_lesson,
             'section_parser': cfg.section_parser, 'revision': cfg.revision_strategy, 'memory': cfg.memory_provider,
             'case_retriever': cfg.case_retriever, 'knowledge_retriever': cfg.knowledge_retriever,
             'retrieval_top_k': cfg.retrieval_top_k, 'auth_provider': cfg.auth_provider,
@@ -82,9 +85,10 @@ class ExperimentConfigFactory:
         if snapshot['version'] == 1:
             return ExperimentConfig(DefaultSectionParser(), provider, LegacyRevisionAdapter(),
                 LegacyContextEngine(DefaultMemoryProvider(history_reader), DefaultContextBuilder()))
-        if snapshot['version'] != 2:
+        if snapshot['version'] not in (2, 3):
             raise ValueError('Unsupported saved configuration')
         contributors = [self.registry.create(name, history=history_reader, snapshot=snapshot)
                         for name in snapshot['context_contributors']]
         return ExperimentConfig(self.registry.create(snapshot['section_parser']), provider, self.registry.create(snapshot['revision']),
-            PipelineContextEngine(contributors, snapshot['max_context_tokens']), snapshot['max_rounds'])
+            PipelineContextEngine(contributors, snapshot.get('max_context_bytes', snapshot.get('max_context_tokens', 12000))),
+            snapshot['max_rounds'])

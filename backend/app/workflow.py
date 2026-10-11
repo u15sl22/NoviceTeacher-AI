@@ -1,7 +1,7 @@
-"""Stable workflow. Every mutation runs under a DB transaction and session lock.
+"""Stable workflow with short request transactions and durable model jobs.
 
-PostgreSQL locks one session row; local SQLite uses BEGIN IMMEDIATE. The bounded
-LLM call deliberately holds that lock in this MVP to prevent duplicate generations.
+PostgreSQL locks one session row; local SQLite uses BEGIN IMMEDIATE. External
+model HTTP is executed by ``app.worker`` after the request transaction commits.
 """
 import hashlib
 import json
@@ -9,11 +9,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select, func
 from . import models as m
 from .history import HistoryReader
-from .orchestrator import ReviewOrchestrator
 from .providers.interfaces import SuggestionDraft
 from .context import ContextBuildRequest
 from .audit import GenerationAudit
 from .auth import AuthorizationPolicy
+from .analysis import build_analysis_plan, content_budget, split_text
+from .context import SYSTEM_PROMPT
+from .providers.llm import ProviderError
 
 
 class WorkflowError(Exception):
@@ -33,10 +35,16 @@ def dump(row):
 def document_dump(row, include_text=False):
     data = {key: getattr(row, key) for key in ('id', 'session_id', 'original_filename',
         'media_type', 'byte_size', 'sha256', 'parse_status', 'parser_name', 'page_count',
-        'created_at')}
+        'parse_error', 'created_at', 'updated_at')}
     if include_text:
         data['extracted_text'] = row.extracted_text
     return data
+
+
+def job_dump(row):
+    return {key: getattr(row, key) for key in ('id', 'session_id', 'round_id', 'section_id',
+        'section_version_id', 'generation_id', 'status', 'attempt_count', 'error_code',
+        'created_at', 'started_at', 'finished_at')}
 
 
 class Workflow:
@@ -66,6 +74,20 @@ class Workflow:
 
     def config(self, session):
         return self.factory.build(session.config_snapshot, HistoryReader(self.db, self.current_user.id))
+
+    def analysis_plan(self, data):
+        try:
+            snapshot = self.factory.snapshot(data.model_profile)
+            config = self.factory.build(snapshot, HistoryReader(self.db, self.current_user.id))
+            drafts = config.section_parser.parse(data.content, data.metadata.model_dump(mode='json'))
+            plan = build_analysis_plan(drafts, snapshot.get('max_context_bytes', snapshot.get('max_context_tokens', 12000)),
+                SYSTEM_PROMPT, snapshot.get('max_analysis_chunks_per_section', 24),
+                snapshot.get('max_analysis_chunks_per_lesson', 80))
+        except ValueError as exc:
+            raise WorkflowError(str(exc), 422) from exc
+        if not drafts or ''.join(d.content for d in drafts) != data.content:
+            raise WorkflowError('切分器必须返回非空列表并完整保留原文。', 422)
+        return plan, drafts, snapshot
 
     def event(self, session, event_type, payload=None, round_id=None, section_id=None):
         sequence = self.db.scalar(select(func.coalesce(func.max(m.InteractionEvent.sequence), 0))
@@ -101,12 +123,13 @@ class Workflow:
             document = self.one(m.UploadedDocument, id=str(data.document_id))
             if not document:
                 raise WorkflowError('找不到已上传的源文件，请重新上传。', 404)
+            if document.parse_status != 'parsed' or not document.extracted_text:
+                raise WorkflowError('源文件仍在识别或识别失败，请先完成 OCR 并校对正文。', 409)
             if document.session_id:
                 raise WorkflowError('此源文件已经用于另一份教案，请重新上传。')
-        try:
-            snapshot = self.factory.snapshot(data.model_profile)
-        except ValueError as exc:
-            raise WorkflowError(str(exc), 422) from exc
+        plan, drafts, snapshot = self.analysis_plan(data)
+        if not plan['processable']:
+            raise WorkflowError('教案超过当前安全分析上限，请缩短正文或增加清晰的教学单元标题。', 422)
         participant = self.add(m.Participant)
         session = self.add(m.Session, participant_id=participant.id, request_key=str(data.request_key),
                            input_hash=fingerprint, lesson_metadata=payload['metadata'], config_snapshot=snapshot)
@@ -123,9 +146,6 @@ class Workflow:
                 'filename': document.original_filename, 'sha256': document.sha256,
                 'parser': document.parser_name})
         self.chat(session, 'user', data.content, 'lesson_plan')
-        drafts = self.config(session).section_parser.parse(data.content, payload['metadata'])
-        if not drafts or ''.join(d.content for d in drafts) != data.content:
-            raise WorkflowError('切分器必须返回非空列表并完整保留原文。', 422)
         sections = []
         for i, draft in enumerate(drafts):
             section = self.add(m.Section, lesson_plan_id=lesson.id, title=draft.title,
@@ -133,7 +153,7 @@ class Workflow:
             self.add(m.SectionVersion, section_id=section.id, round_number=0, version_number=0, content=draft.content)
             sections.append(section)
         self.event(session, 'SECTIONS_PARSED', {'parser': snapshot['section_parser'], 'section_ids': [s.id for s in sections]})
-        self.ensure_overview(session, sections)
+        self.ensure_overview(session, sections, plan)
         self.start_round(session, sections, 1)
         return session
 
@@ -159,8 +179,19 @@ class Workflow:
                 'suggestions': [{**dump(s), 'decision': (dump(d) if (d := self.one(m.Decision, suggestion_id=s.id)) else None)}
                                  for s in suggestions]})
         document = self.one(m.UploadedDocument, session_id=session.id)
+        current_job = None
+        if session.current_section_id:
+            current_job = self.db.scalar(select(m.GenerationJob).where(
+                m.GenerationJob.user_id == self.current_user.id,
+                m.GenerationJob.session_id == session.id,
+                m.GenerationJob.round_id == round.id,
+                m.GenerationJob.section_id == session.current_section_id)
+                .order_by(m.GenerationJob.created_at.desc()).limit(1))
+        overview = self.one(m.LessonOverview, session_id=session.id)
         return {'session': dump(session), 'lesson_plan': dump(lesson), 'round': dump(round), 'sections': result,
                 'source_document': document_dump(document) if document else None,
+                'generation_job': job_dump(current_job) if current_job else None,
+                'analysis_plan': overview.content.get('analysis_plan') if overview else None,
                 'lesson_plan_versions': [dump(v) for v in sorted(self.rows(m.LessonPlanVersion, lesson_plan_id=lesson.id),
                                                                key=lambda v: v.round_number)]}
 
@@ -197,18 +228,74 @@ class Workflow:
         self.event(session, 'SECTION_VIEWED', {'section_version_id': section_version_id,
             'suggestion_ids': suggestion_ids, 'decision_ids': decision_ids}, round_id, section_id)
 
-    def generate(self, session, round_id, section_id):
-        round, section, review = self.active_target(session, round_id, section_id)
-        if review.generated_at:
-            return None
-        audit = GenerationAudit(self, session, round, section, review)
+    def _generation_contexts(self, session, round, section, audit):
+        config = self.config(session)
+        budget = session.config_snapshot.get('max_context_bytes', session.config_snapshot.get('max_context_tokens', 12000))
+        chunks = split_text(section.current_content, content_budget(budget, SYSTEM_PROMPT))
+        if len(chunks) > session.config_snapshot.get('max_analysis_chunks_per_section', 24):
+            raise ProviderError('ANALYSIS_LIMIT', '当前单元需要的内部分析块超过安全上限，请缩短后重试。')
         sections = self.sections(section.lesson_plan_id)
         overview = self.ensure_overview(session, sections)
         snapshots = [{**dump(s), 'version_id': self.latest(s.id).id} for s in sections]
-        request = ContextBuildRequest(user_id=self.current_user.id, session=dump(session), round=dump(round),
-            section=next(s for s in snapshots if s['id'] == section.id), all_sections=snapshots, overview=dump(overview))
-        _, error = ReviewOrchestrator(self.config(session)).generate(request, audit)
-        return error
+        contexts = []
+        for chunk in chunks:
+            current = next(s for s in snapshots if s['id'] == section.id).copy()
+            current['current_content'] = chunk.content
+            current['analysis_chunk'] = chunk.as_dict()
+            request = ContextBuildRequest(user_id=self.current_user.id, session=dump(session), round=dump(round),
+                section=current, all_sections=snapshots, overview=dump(overview))
+            context = config.context_engine.prepare(request, audit)
+            context.user['analysis_chunk'] = {**chunk.as_dict(), 'count': len(chunks)}
+            contexts.append(context)
+        return config, contexts
+
+    @staticmethod
+    def _merge_suggestions(groups):
+        merged, seen = [], set()
+        for group in groups:
+            for suggestion in group:
+                key = (' '.join(suggestion.issue.split()).lower(), ' '.join(suggestion.revision.split()).lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(suggestion)
+                if len(merged) == 2:
+                    return merged
+        return merged
+
+    def generate(self, session, round_id, section_id):
+        round, section, review = self.active_target(session, round_id, section_id)
+        if review.generated_at:
+            return None, None
+        audit = GenerationAudit(self, session, round, section, review)
+        active = self.db.scalar(select(m.GenerationJob).where(m.GenerationJob.user_id == self.current_user.id,
+            m.GenerationJob.round_id == round.id, m.GenerationJob.section_id == section.id,
+            m.GenerationJob.status.in_(['QUEUED', 'RUNNING'])).order_by(m.GenerationJob.created_at.desc()).limit(1))
+        if active:
+            return active, None
+        generation = None
+        try:
+            config, contexts = self._generation_contexts(session, round, section, audit)
+            payload = contexts[0].model_dump(mode='json') if len(contexts) == 1 else {
+                'mode': 'chunked', 'merge_policy': 'stable_exact_dedup_first_two',
+                'contexts': [context.model_dump(mode='json') for context in contexts]}
+            generation = audit.started(payload)
+            if session.config_snapshot['provider'] == 'mock':
+                groups = [config.suggestion_provider.generate(context) for context in contexts]
+                merged = self._merge_suggestions(groups)
+                audit.completed(generation, merged, None if len(contexts) == 1 else {
+                    'merge_policy': 'stable_exact_dedup_first_two',
+                    'merged_suggestions': [item.model_dump(mode='json') for item in merged]})
+                return None, None
+            job = self.add(m.GenerationJob, session_id=session.id, round_id=round.id, section_id=section.id,
+                section_version_id=generation.section_version_id, generation_id=generation.id,
+                context_json=payload, status='QUEUED')
+            self.event(session, 'SUGGESTION_GENERATION_QUEUED', {'job_id': job.id,
+                'generation_id': generation.id, 'analysis_chunk_count': len(contexts)}, round.id, section.id)
+            return job, None
+        except ProviderError as error:
+            audit.failed(generation, error)
+            return None, error
 
     def decide(self, session, suggestion_id, decision, confirm_append=False, expected_version_id=None):
         suggestion = self.one(m.Suggestion, id=suggestion_id)
@@ -308,7 +395,8 @@ class Workflow:
         state = self.get_current_state(session)
         section_ids = [s['id'] for s in state['sections']]
         result = {'schema_version': 2, 'user_id': self.current_user.id, 'state': state, 'participant': dump(self.one(m.Participant, id=session.participant_id))}
-        for cls in (m.Round, m.Decision, m.CustomPrompt, m.RetrievalRecord, m.GenerationRecord, m.ContextSnapshot, m.SystemConfigSnapshot, m.LessonOverview):
+        for cls in (m.Round, m.Decision, m.CustomPrompt, m.RetrievalRecord, m.GenerationRecord,
+                    m.GenerationJob, m.ContextSnapshot, m.SystemConfigSnapshot, m.LessonOverview):
             result[cls.__tablename__] = [dump(x) for x in self.rows(cls, session_id=session.id)]
         result['interaction_events'] = [dump(x) for x in self.db.scalars(select(m.InteractionEvent)
             .where(m.InteractionEvent.session_id == session.id, m.InteractionEvent.user_id == self.current_user.id).order_by(m.InteractionEvent.sequence))]
@@ -319,6 +407,8 @@ class Workflow:
         result['chat_messages'] = [dump(x) for x in self.rows(m.ChatMessage, conversation_id=conversation.id)] if conversation else []
         document = self.one(m.UploadedDocument, session_id=session.id)
         result['uploaded_documents'] = [document_dump(document, include_text=True)] if document else []
+        ocr_job = self.one(m.DocumentProcessingJob, document_id=document.id) if document else None
+        result['document_processing_jobs'] = [dump(ocr_job)] if ocr_job else []
         result['summary'] = {'section_count': len(section_ids), 'round_count': len(result['rounds']),
             'suggestions': len(result['suggestions']), 'accepts': sum(x['decision'] == 'ACCEPT' for x in result['decisions']),
             'rejects': sum(x['decision'] == 'REJECT' for x in result['decisions']),
@@ -326,7 +416,7 @@ class Workflow:
         result['failures'] = [x for x in result['generation_records'] if x['error_code']]
         return result
 
-    def ensure_overview(self, session, sections):
+    def ensure_overview(self, session, sections, analysis_plan=None):
         overview = self.one(m.LessonOverview, session_id=session.id)
         if overview: return overview
         def excerpts(types):
@@ -336,7 +426,8 @@ class Workflow:
             **session.lesson_metadata, 'section_list': [{'id': s.id, 'title': s.title, 'type': s.section_type} for s in sections],
             'recognized_objectives': excerpts(['objectives']), 'activity_overview': excerpts(['exploration','practice','teaching_process']),
             'assessment_overview': excerpts(['assessment']), 'short_lesson_summary': ' / '.join(s.title for s in sections),
-            'basis': 'section_excerpts_at_overview_creation', 'generated_once': True})
+            'basis': 'section_excerpts_at_overview_creation', 'generated_once': True,
+            'analysis_plan': analysis_plan})
 
     def chat(self, session, role, content, message_type, section_id=None, suggestion_id=None):
         conversation = self.one(m.Conversation, session_id=session.id)

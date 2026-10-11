@@ -2,9 +2,9 @@
 
 ## 交付状态
 
-两个常驻容器：`app`（Vue 构建文件 + FastAPI）和 `db`（PostgreSQL 17）。`migrate` 为一次性数据库结构升级任务；`maintenance` 是按需执行的管理工具容器，不常驻。前端不运行 Vite 开发服务器。
+四个常驻容器：`app`（Vue 构建文件 + FastAPI）、`worker`（异步模型生成）、`ocr-worker`（本地扫描 PDF 识别）和 `db`（PostgreSQL 17）。`migrate` 为一次性数据库结构升级任务；`maintenance` 是按需执行的管理工具容器，不常驻。前端不运行 Vite 开发服务器。
 
-已在 Windows Docker Desktop 上完成真实构建和运行验证：PostgreSQL、Alembic、应用健康检查均通过，容器内 PostgreSQL 测试为 67 passed、1 skipped；现有 SQLite 历史已事务迁移并逐表核验。跨主机恢复脚本已完成自动化测试，正式上服务器时仍应按第 5、6 节完成一次目标主机恢复演练和人工验收。
+已在 Windows Docker Desktop 上完成 PostgreSQL、Alembic、应用健康检查、历史迁移和真实扫描 PDF 验证。本地后端 **80 passed**，容器 PostgreSQL **79 passed、1 skipped**，前端构建和 Compose 配置解析通过；app、worker、ocr-worker、db 现场启动正常，migrate 退出码为 0，业务库已升级到 `d8a41c9e72b3`。一份 4 页真实扫描教案经上传、排队和 Worker 识别后生成 2539 字正文。跨主机恢复脚本已完成自动化测试，正式上服务器时仍应按第 5、6 节完成一次目标主机恢复演练和人工验收。
 
 ## 1. 首次启动（全新数据库）
 
@@ -21,10 +21,10 @@ Copy-Item .env.compose.example .env.compose
 ```powershell
 docker compose --env-file .env.compose up -d --build
 docker compose --env-file .env.compose ps -a
-docker compose --env-file .env.compose logs --tail 100 app migrate
+docker compose --env-file .env.compose logs --tail 100 app worker ocr-worker migrate
 ```
 
-打开 http://127.0.0.1:8000 。启动顺序：数据库健康 → Alembic 成功 → 应用启动。迁移失败时应用不会启动。若本地旧服务占用 8000，先停止旧服务，或修改 APP_PORT。
+打开 http://127.0.0.1:8000 。启动顺序：数据库健康 → Alembic 成功 → 应用、模型 Worker 与 OCR Worker 启动。迁移失败时这些服务不会启动。若本地旧服务占用 8000，先停止旧服务，或修改 APP_PORT。
 
 停止：`docker compose --env-file .env.compose stop`。
 
@@ -35,12 +35,14 @@ docker compose --env-file .env.compose logs --tail 100 app migrate
 | 数据 | 容器路径 / 卷 | 约定 |
 |---|---|---|
 | 教案正文、V0/V1、用户、建议、来源、研究日志 | db 的 `/var/lib/postgresql/data` / `pedago_data` | PostgreSQL 是业务数据源 |
-| 原始 Word/PDF | app 的 `/data/documents` / `documents` | 独立于镜像；不暴露为静态目录 |
+| 原始 Word/PDF | app 与 ocr-worker 的 `/data/documents` / `documents` | 独立于镜像；不暴露为静态目录 |
 | 本地开发附件 | 项目 `storage/documents` | 不受启动命令工作目录影响，可用 STORAGE_ROOT 改写 |
 | 备份 | 人工指定的 `backups/批次目录` | 数据库、附件、校验清单配套保存 |
 | SQLite 迁移输入 | `imports/legacy.db` → 工具容器 `/imports/legacy.db` | 只读挂载，不使用 Windows 绝对路径 |
 
 `LocalDocumentStorage` 实现 DocumentStorage 接口：保存返回随机 UUID 相对键，读取使用该键。禁止绝对路径、目录穿越及越界符号链接。以后对象存储可以实现相同接口。`uploaded_documents` 保存文件名、所属用户、SHA-256、解析器、提取正文和 session 对应关系；上传接口只接受 DOCX 与 PDF，默认上限 15 MB。
+
+扫描或部分扫描 PDF 返回 202，并创建 `document_processing_jobs`。`ocr-worker` 使用 Poppler 逐页渲染、Tesseract `chi_sim+eng` 本地识别；任务进度和失败状态保存在 PostgreSQL。原 PDF 不离开服务器，不发送给第三方 OCR。OCR 文本可能有识别错误，必须在创建修订会话前由用户校对。
 
 下载接口先按当前用户查询附件记录，再读取私有 storage key，不公开任意键。原始附件保留，不随某轮正文修改覆盖；提取正文经用户确认后成为 V0，后续正文版本仍保存于数据库。上传教案不会自动进入共享知识库；现有 Dataset 的 source_reference 也不会自动变成可下载附件。
 
@@ -101,6 +103,8 @@ docker compose --env-file .env.compose up -d --wait
 docker compose --env-file .env.compose run --rm maintenance python scripts/test_postgres.py
 docker compose --env-file .env.compose run --rm maintenance python scripts/smoke_llm.py --postgres --profile deepseek
 ```
+
+真实模型请求返回 202 后由 `worker` 消费数据库中的 `generation_jobs`。扫描 PDF 上传返回 202 后由 `ocr-worker` 消费 `document_processing_jobs`。验收时应确认 `docker compose ps` 中 app、worker、ocr-worker、db 均在运行，并分别用 `docker compose logs worker` 和 `docker compose logs ocr-worker` 检查后台任务。两个 Worker 执行耗时操作时都不持有数据库长事务；完成后重新锁定记录并提交结果。
 
 PostgreSQL 测试和真实模型 smoke 均在独立随机 schema 中运行并清理，不删除业务 schema。真实模型命令会产生供应商 API 用量，并要求至少生成一条建议。还须人工验证：新建并修订 → 重建 app 后恢复 → 备份 → 新项目恢复 → 对比历史和附件。首次真实跨库迁移需核对脚本的逐表输出以及应用页面。
 

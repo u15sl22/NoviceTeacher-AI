@@ -8,20 +8,36 @@ class GenerationAudit:
         self.w, self.session, self.round, self.section, self.review = workflow, session, round, section, review
         self.sources = {}
 
+    @staticmethod
+    def _payload(context):
+        return context.model_dump(mode='json') if hasattr(context, 'model_dump') else context
+
+    @staticmethod
+    def _fragments(payload):
+        if 'contexts' in payload:
+            return [fragment for context in payload['contexts']
+                    for fragment in context.get('user', {}).get('fragments', [])]
+        return payload.get('user', {}).get('fragments', [])
+
+    def load_sources(self, context):
+        for fragment in self._fragments(self._payload(context)):
+            for item in fragment.get('content', {}).get('verified_knowledge', []):
+                self.sources[item['id']] = item
+
     def retrieved(self, record):
         row = self.w.add(m.RetrievalRecord, session_id=self.session.id, round_id=self.round.id,
                         section_id=self.section.id, **record)
         self.w.event(self.session, 'RETRIEVAL_COMPLETED', {'retrieval_record_id': row.id}, self.round.id, self.section.id)
 
     def started(self, context):
+        payload = self._payload(context)
         generation = self.w.add(m.GenerationRecord, session_id=self.session.id, round_id=self.round.id,
             section_id=self.section.id, section_version_id=self.w.latest(self.section.id).id,
-            provider_type=self.session.config_snapshot['provider'], runtime_context=context.model_dump(mode='json'))
-        fragments = context.user.get('fragments', [])
+            provider_type=self.session.config_snapshot['provider'], runtime_context=payload)
+        fragments = self._fragments(payload)
         def refs(key):
             return [v for f in fragments for v in f.get('metadata', {}).get(key, [])]
-        for f in fragments:
-            for item in f['content'].get('verified_knowledge', []): self.sources[item['id']] = item
+        self.load_sources(payload)
         overview = next((f['metadata'].get('lesson_overview_id') for f in fragments if f['metadata'].get('lesson_overview_id')), None)
         cfg = self.session.config_snapshot
         self.w.add(m.ContextSnapshot, session_id=self.session.id, round_id=self.round.id, section_id=self.section.id,
@@ -31,7 +47,7 @@ class GenerationAudit:
             related_section_ids=refs('related_section_ids'), memory_reference_ids=refs('memory_reference_ids'),
             preference_ids=refs('preference_ids'), knowledge_ids=refs('knowledge_ids'), case_ids=refs('case_ids'),
             prompt_version=cfg.get('prompt_version', 'legacy_v1'), model_provider=cfg.get('model_provider', cfg['provider']),
-            model_name=cfg['model'], system_config_version=cfg['version'], context_json=context.model_dump(mode='json'))
+            model_name=cfg['model'], system_config_version=cfg['version'], context_json=payload)
         return generation
 
     def failed(self, generation, error):

@@ -126,7 +126,9 @@ MEMORY_PROVIDER=rule_based
 CASE_RETRIEVER=metadata
 KNOWLEDGE_RETRIEVER=metadata
 RETRIEVAL_TOP_K=3
-MAX_CONTEXT_TOKENS=12000
+MAX_CONTEXT_BYTES=12000
+MAX_ANALYSIS_CHUNKS_PER_SECTION=24
+MAX_ANALYSIS_CHUNKS_PER_LESSON=80
 SECTION_PARSER=bounded_v2
 REVISION_STRATEGY=replace_or_append_v2
 AUTH_PROVIDER=development
@@ -278,7 +280,7 @@ npm run test:e2e
 ## 29. Known limitations
 
 - 2026-10-07 已用 DeepSeek `deepseek-flash` 在一次性 PostgreSQL schema 完成真实建议、决策、结束和导出验收；本次得到 1 条建议。该结果证明链路可用，不等于教学质量已经通过专家评审。
-- 网页支持 DOCX 与文本型 PDF 上传、正文预览校对、原文件私有保存和下载；扫描 PDF/OCR 尚未实现。上传教案属于用户会话来源，不自动进入共享 Dataset/Knowledge。
+- 网页支持 DOCX、文本型 PDF 和扫描 PDF 上传、正文预览校对、原文件私有保存和下载。扫描或部分扫描 PDF 由独立 OCR Worker 在服务器本地逐页识别，失败可重试。上传教案属于用户会话来源，不自动进入共享 Dataset/Knowledge。
 - 资料检索链路已接入，但没有人工核验资产，因此默认不会出现可信检索结果。
 - 元数据检索是基础规则排序；概览为规则摘录，分段为无损规则合并，复杂教案的教学单元质量还需试用。
 - DevelopmentAuthProvider 不是生产认证。当前模型调用仍在会话事务中；SQLite 写入串行，适合本机 internal pilot，不是高并发部署。

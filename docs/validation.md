@@ -1,5 +1,14 @@
 # Alpha validation — 2026-10-07
 
+## Async generation and long-lesson update — 2026-10-11
+
+- Backend regression: **80 passed** on SQLite, including durable generation jobs, request/worker separation, input-version stale-result rejection, analysis preflight, byte-bounded long-section chunking and the OCR queue lifecycle.
+- Production frontend build passed. Browser regression: **2 passed, 1 dataset test skipped** against an isolated Mock database. The UI now confirms high estimated call counts, displays queued/running/failed/stale task states and restores results after refresh.
+- `docker compose config --quiet` passed. A fresh live Compose build/start completed with app、worker、ocr-worker、db healthy/running and migrate exited 0. The business database is at Alembic `d8a41c9e72b3`; both durable job tables exist.
+- Isolated container PostgreSQL regression: **79 passed, 1 skipped**. The application health endpoint returned `status=ok`, and both Workers ran without restarts.
+- Online OCR was exercised end to end with a real 4-page scanned lesson plan: upload returned HTTP 202, the OCR Worker reached `SUCCEEDED`, and the result contained 2539 characters. Poppler and Tesseract ran inside the application image; the PDF was not sent to a third-party OCR service.
+- No external model was called during this update, so it created no DeepSeek/智谱 API usage.
+
 ## Deployment/storage update — 2026-09-30
 
 - Container PostgreSQL suite: **72 passed, 1 skipped**; production frontend build passed.

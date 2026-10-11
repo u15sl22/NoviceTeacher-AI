@@ -68,7 +68,7 @@ class LessonPlan(Owned, Record, Base):
 class UploadedDocument(Owned, Record, Base):
     __tablename__ = 'uploaded_documents'
     __table_args__ = (
-        CheckConstraint("parse_status IN ('parsed')"),
+        CheckConstraint("parse_status IN ('queued','processing','parsed','failed')"),
         UniqueConstraint('storage_key'),
         UniqueConstraint('session_id'),
     )
@@ -79,9 +79,29 @@ class UploadedDocument(Owned, Record, Base):
     byte_size: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64))
     parse_status: Mapped[str] = mapped_column(String(20), default='parsed')
-    parser_name: Mapped[str] = mapped_column(String(100))
-    extracted_text: Mapped[str] = mapped_column(Text)
+    parser_name: Mapped[str | None] = mapped_column(String(100))
+    extracted_text: Mapped[str | None] = mapped_column(Text)
     page_count: Mapped[int | None] = mapped_column(Integer)
+    parse_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class DocumentProcessingJob(Owned, Record, Base):
+    """Durable OCR work state; source bytes remain in private document storage."""
+    __tablename__ = 'document_processing_jobs'
+    __table_args__ = (
+        CheckConstraint("status IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','CANCELLED')"),
+        UniqueConstraint('document_id'),
+    )
+    document_id: Mapped[str] = mapped_column(ForeignKey('uploaded_documents.id'), index=True)
+    status: Mapped[str] = mapped_column(String(20), default='QUEUED', index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_page: Mapped[int] = mapped_column(Integer, default=0)
+    total_pages: Mapped[int | None] = mapped_column(Integer)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
 
 
 class LessonPlanVersion(Owned, Record, Base):
@@ -144,6 +164,27 @@ class GenerationRecord(Owned, Record, Base):
     provider_type: Mapped[str] = mapped_column(String(100))
     runtime_context: Mapped[dict] = mapped_column(json_type)
     raw_response: Mapped[dict | None] = mapped_column(json_type)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+
+
+class GenerationJob(Owned, Record, Base):
+    """Durable execution state; model HTTP happens outside request transactions."""
+    __tablename__ = 'generation_jobs'
+    __table_args__ = (
+        CheckConstraint("status IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','STALE','CANCELLED')"),
+        UniqueConstraint('generation_id'),
+    )
+    session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
+    round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
+    section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
+    section_version_id: Mapped[str] = mapped_column(ForeignKey('section_versions.id'))
+    generation_id: Mapped[str] = mapped_column(ForeignKey('generation_records.id'))
+    status: Mapped[str] = mapped_column(String(20), default='QUEUED', index=True)
+    context_json: Mapped[dict] = mapped_column(json_type)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(100))
 
 

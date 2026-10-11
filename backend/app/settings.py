@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     database_password: str = ''
     storage_root: Path = Path(__file__).resolve().parents[2] / 'storage' / 'documents'
     max_document_bytes: int = Field(default=15 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+    ocr_enabled: bool = True
+    ocr_dpi: int = Field(default=200, ge=150, le=300)
+    ocr_max_pages: int = Field(default=100, ge=1, le=300)
+    ocr_page_timeout_seconds: int = Field(default=90, ge=10, le=600)
+    ocr_languages: str = Field(default='chi_sim+eng', pattern=r'^[a-z0-9_+]+$')
+    ocr_min_text_chars_per_page: int = Field(default=20, ge=0, le=500)
 
     @model_validator(mode='after')
     def resolve_database(self):
@@ -48,13 +54,20 @@ class Settings(BaseSettings):
     development_username: str = 'development'
     context_contributors: list[str] = Field(default_factory=lambda: [
         'lesson_context', 'session_memory', 'knowledge_retrieval', 'case_retrieval'])
-    max_context_tokens: int = Field(default=12000, ge=256)
+    max_context_bytes: int = Field(default=12000, ge=4096)
+    # Backward-compatible environment input. New snapshots use max_context_bytes.
+    max_context_tokens: int | None = Field(default=None, ge=256)
+    max_analysis_chunks_per_section: int = Field(default=24, ge=1, le=100)
+    max_analysis_chunks_per_lesson: int = Field(default=80, ge=1, le=500)
     memory_provider: str = 'rule_based'
     case_retriever: str = 'metadata'
     knowledge_retriever: str = 'metadata'
     retrieval_top_k: int = Field(default=3, ge=1, le=10)
     section_parser: str = 'bounded_v2'
     revision_strategy: str = 'replace_or_append_v2'
+
+    def context_budget_bytes(self):
+        return self.max_context_tokens or self.max_context_bytes
 
     def model_profiles(self):
         if self.suggestion_provider == 'mock':

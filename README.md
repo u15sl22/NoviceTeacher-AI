@@ -3,7 +3,7 @@
 
 **A Knowledge-Augmented Human-AI Framework for Scaffolding Novice Teacher Lesson-Plan Revision and Professional Growth**
 
-研究型教案修订 MVP。支持粘贴文本或上传 DOCX/文本型 PDF → 提取预览 → 动态分段 → 0–2 条建议 → Yes/No → 单元修订 → 多轮 → 最终教案。原文件、V0 和完整修订过程持久保存，刷新后从数据库恢复。
+研究型教案修订 MVP。支持粘贴文本或上传 DOCX、文本型/扫描型 PDF → 提取或后台 OCR → 预览校对 → 动态分段 → 0–2 条建议 → Yes/No → 单元修订 → 多轮 → 最终教案。原文件、V0 和完整修订过程持久保存，刷新后从数据库恢复。
 
 ## 快速运行（Windows）
 
@@ -56,7 +56,7 @@ ZHIPU_API_KEY=填写智谱密钥
 
 ## PostgreSQL
 
-现在提供完整 Docker Compose 编排：**应用（前端静态页面＋后端）与 PostgreSQL 两个常驻容器**，另有一次性迁移任务、独立附件卷和备份恢复工具。操作细节见 **[部署与存储规范](docs/deployment.md)**。
+现在提供完整 Docker Compose 编排：**应用、模型 Worker、OCR Worker 与 PostgreSQL 四个常驻容器**，另有一次性迁移任务、独立附件卷和备份恢复工具。OCR 使用容器内的 Tesseract 中文/英文模型，不把 PDF 发送给第三方。操作细节见 **[部署与存储规范](docs/deployment.md)**。
 
 ```powershell
 Copy-Item .env.compose.example .env.compose
@@ -97,6 +97,14 @@ npm run build
 
 对真实 PostgreSQL 运行同一套状态机测试：设置 `TEST_DATABASE_URL` 为专用测试实例连接串，再运行 pytest。每个用例创建独立 `pedago_test_<uuid>` schema，结束后只清理该测试 schema，不操作业务 schema。
 
+### 数据集只读清洗
+
+```powershell
+./.venv/Scripts/python.exe scripts/clean_dataset.py
+```
+
+该命令只读取41份原教案及1118条原始批注，不连接业务数据库，也不调用外部模型。运行前后会核对两个源 JSON 和41份原教案的 SHA-256；详细派生记录写入被 Git 忽略的 `.runtime/dataset-cleaning/`，摘要见 [数据集只读清洗报告](docs/dataset-cleaning-report.md)。所有记录保持 `unreviewed / not_verified`，重复、模板、泄漏和原文定位结果均只是待人工检查的机械标记。旧 DOC可通过 `scripts/convert_legacy_docs.ps1` 生成派生 DOCX；扫描 PDF可通过 Windows PowerShell运行 `scripts/ocr_dataset_pdfs.ps1` 生成本地 OCR文本，二者都不覆盖源文件。
+
 ## 数据与使用规则
 
 - `V0` 保留输入原文；每轮完成立即保存 `V1…V5`，即使随后选择结束也有完整快照。
@@ -104,6 +112,9 @@ npm run build
 - 首版修改策略为**追加具体修订内容**，两条采纳依次累加，不互相覆盖。界面会说明此行为。
 - 建议的教学依据标为“暂定，未经知识库验证”。当前没有正式 RAG 或来源背书。
 - 每轮每单元最多生成一组成功建议；0 条建议同样持久标记已生成。失败可重试。
+- 真实模型生成先保存任务，再由 Worker 在请求事务之外调用模型；页面会显示排队/生成状态并自动获取结果。
+- 长单元在模型内部按 UTF-8 字节预算切块，教师仍按原教学单元审阅；开始前会预估调用次数并检查安全上限。
+- 扫描或部分扫描 PDF 会先保存原文件，再由 OCR Worker 逐页识别；页面显示进度，失败可重试，成功后必须由用户校对正文。
 - 必须处理所有建议后进入下一单元；完成一轮才可继续或结束。后端拒绝第六轮及结束后的编辑。
 - 复制恢复链接可在另一页面恢复。浏览器仅保存会话定位信息；待确认的首次提交临时保存请求编号和原始载荷，成功后清除。
 - 最终页面可查看任意轮次教案、下载文本、导出完整 JSON 研究记录。导出包含所有轮次的建议、决策、单元版本、生成上下文、原始模型返回、检索记录、事件及时间戳。
@@ -117,6 +128,10 @@ backend/app/
   models.py               持久化领域模型和数据库约束
   schemas.py              输入验证
   workflow.py             会话、版本、轮次状态机和事件
+  analysis.py             长教案预检与内部分析块
+  worker.py               持久化模型任务、租约和版本核对
+  ocr.py                  本地 PDF 页面识别适配器
+  ocr_worker.py           持久化 OCR 任务、进度和重试
   history.py              只读历史查询
   orchestrator.py          协调研究模块
   providers/
@@ -130,6 +145,7 @@ frontend/src/             Vue 四阶段工作台
 frontend/tests/           真实浏览器流程测试
 scripts/                  安装、启动、真实服务探测
 docs/architecture.md      扩展边界、API、研究取舍
+docs/system-requirements-and-architecture.md  当前完整需求与架构说明
 ```
 
 ## 当前范围

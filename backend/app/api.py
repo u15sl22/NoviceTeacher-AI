@@ -7,15 +7,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import text, select, func
 from sqlalchemy.exc import IntegrityError, OperationalError
 from .db import SessionLocal
 from .settings import settings
-from .schemas import CreateSession, Decide, ReviewTarget, ViewAck
+from .schemas import AnalysisPlanRequest, CreateSession, Decide, ReviewTarget, ViewAck
 from .providers.config import ExperimentConfigFactory
 from .workflow import Workflow, WorkflowError
 from .auth import AUTH_PROVIDERS
-from .documents import DocumentParseError, parse_document
+from .documents import DocumentParseError, OCRRequired, parse_document
 from .storage import LocalDocumentStorage
 from . import models as m
 
@@ -25,6 +26,17 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
     factory = config_factory or ExperimentConfigFactory(settings)
     auth = auth_provider or AUTH_PROVIDERS[factory.settings.auth_provider](factory.settings)
     document_store = document_storage or LocalDocumentStorage(factory.settings.storage_root)
+
+    def document_result(w, document):
+        job = w.one(m.DocumentProcessingJob, document_id=document.id)
+        return {'id': document.id, 'filename': document.original_filename,
+            'media_type': document.media_type, 'byte_size': document.byte_size,
+            'sha256': document.sha256, 'parse_status': document.parse_status,
+            'parser_name': document.parser_name, 'page_count': document.page_count,
+            'text': document.extracted_text, 'char_count': len(document.extracted_text or ''),
+            'error': document.parse_error,
+            'processing': ({key: getattr(job, key) for key in ('status', 'attempt_count',
+                'current_page', 'total_pages', 'error_code')} if job else None)}
 
     @contextmanager
     def transaction(request):
@@ -48,6 +60,7 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
             db.execute(text('SELECT 1'))
         return {'status': 'ok', 'provider': factory.settings.suggestion_provider,
                 'llm_configured': any(item['configured'] for item in profiles),
+                'ocr_enabled': factory.settings.ocr_enabled,
                 'default_model_profile': next(item['id'] for item in profiles if item['default']),
                 'max_rounds': 5}
 
@@ -61,6 +74,7 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
         with transaction(request) as w:
             return {'contributors': factory.settings.context_contributors,
                 'model_profiles': factory.public_profiles(),
+                'online_ocr': factory.settings.ocr_enabled,
                 'verified_cases': w.db.scalar(select(func.count()).select_from(m.CaseItem).join(m.DatasetAnnotation,
                     m.CaseItem.source_annotation_id == m.DatasetAnnotation.id).where(m.CaseItem.verification_status == 'verified',
                         m.DatasetAnnotation.verification_status == 'verified')),
@@ -71,6 +85,11 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
     def history(request: Request):
         with transaction(request) as w:
             return w.list_sessions()
+
+    @app.post('/api/analysis-plan')
+    def analysis_plan(request: Request, data: AnalysisPlanRequest):
+        with transaction(request) as w:
+            return w.analysis_plan(data)[0]
 
     @app.post('/api/documents')
     async def upload_document(request: Request, filename: str):
@@ -89,28 +108,67 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
             raise HTTPException(422, '文件不能为空。')
         if len(content) > factory.settings.max_document_bytes:
             raise HTTPException(413, '文件超过 15 MB 限制。')
+        suffix = Path(name).suffix.lower()
+        if suffix not in ('.docx', '.pdf'):
+            raise HTTPException(422, '仅支持 .docx 和 .pdf 文件。')
+        queued_ocr = False
         try:
-            parsed = parse_document(content, name)
+            # Parsing may be CPU intensive; do not block the asyncio event loop.
+            parsed = await run_in_threadpool(
+                parse_document,
+                content,
+                name,
+                factory.settings.ocr_min_text_chars_per_page,
+            )
+        except OCRRequired as exc:
+            if not factory.settings.ocr_enabled:
+                raise HTTPException(422, '服务器未启用扫描 PDF OCR。') from exc
+            queued_ocr = True
+            parsed = None
+            page_count = exc.page_count
         except DocumentParseError as exc:
             raise HTTPException(422, str(exc)) from exc
-        suffix = Path(name).suffix.lower()
         key = document_store.put(content, suffix)
         try:
             with transaction(request) as w:
                 document = w.add(m.UploadedDocument, original_filename=name, storage_key=key,
-                    media_type=parsed.media_type, byte_size=len(content),
-                    sha256=hashlib.sha256(content).hexdigest(), parse_status='parsed',
-                    parser_name=parsed.parser_name, extracted_text=parsed.text,
-                    page_count=parsed.page_count)
-                result = {'id': document.id, 'filename': document.original_filename,
-                    'media_type': document.media_type, 'byte_size': document.byte_size,
-                    'sha256': document.sha256, 'parser_name': document.parser_name,
-                    'page_count': document.page_count, 'text': document.extracted_text,
-                    'char_count': len(document.extracted_text)}
+                    media_type='application/pdf' if queued_ocr else parsed.media_type,
+                    byte_size=len(content), sha256=hashlib.sha256(content).hexdigest(),
+                    parse_status='queued' if queued_ocr else 'parsed',
+                    parser_name=None if queued_ocr else parsed.parser_name,
+                    extracted_text=None if queued_ocr else parsed.text,
+                    page_count=page_count if queued_ocr else parsed.page_count)
+                if queued_ocr:
+                    w.add(m.DocumentProcessingJob, document_id=document.id, status='QUEUED',
+                        total_pages=page_count)
+                result = document_result(w, document)
         except Exception:
             document_store.delete(key)
             raise
-        return result
+        return JSONResponse(status_code=202, content=jsonable_encoder(result)) if queued_ocr else result
+
+    @app.get('/api/documents/{document_id}')
+    def document_status(request: Request, document_id: UUID):
+        with transaction(request) as w:
+            document = w.one(m.UploadedDocument, id=str(document_id))
+            if not document:
+                raise WorkflowError('找不到此源文件。', 404)
+            return document_result(w, document)
+
+    @app.post('/api/documents/{document_id}/retry')
+    def retry_document(request: Request, document_id: UUID):
+        with transaction(request) as w:
+            document = w.one(m.UploadedDocument, id=str(document_id))
+            job = w.one(m.DocumentProcessingJob, document_id=str(document_id)) if document else None
+            if not document or not job:
+                raise WorkflowError('找不到此 OCR 任务。', 404)
+            if job.status != 'FAILED':
+                raise WorkflowError('只有失败的 OCR 任务可以重试。')
+            job.status, job.current_page, job.error_code = 'QUEUED', 0, None
+            job.lease_expires_at, job.finished_at = None, None
+            document.parse_status, document.parse_error = 'queued', None
+            document.updated_at = m.now()
+            return document_result(w, document)
 
     @app.get('/api/documents/{document_id}/download')
     def download_document(request: Request, document_id: UUID):
@@ -154,11 +212,13 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
     def generate(request: Request, session_id: UUID, target: ReviewTarget):
         with transaction(request) as w:
             session = w.session(str(session_id))
-            error = w.generate(session, str(target.round_id), str(target.section_id))
+            job, error = w.generate(session, str(target.round_id), str(target.section_id))
             state = w.get_current_state(session)
         # Provider failure is committed as history before returning an error response.
         if error:
             return JSONResponse(status_code=502, content={'detail': str(error), 'code': error.code})
+        if job:
+            return JSONResponse(status_code=202, content=jsonable_encoder(state))
         return state
 
     @app.post('/api/sessions/{session_id}/suggestions/{suggestion_id}/decision')

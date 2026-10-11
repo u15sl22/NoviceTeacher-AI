@@ -7,7 +7,10 @@ from pypdf import PdfWriter
 from sqlalchemy import select
 
 from app.api import create_app
-from app.models import UploadedDocument
+from app.documents import ParsedDocument
+from app.models import DocumentProcessingJob, UploadedDocument
+from app.ocr_worker import OCRWorker
+from app.ocr import OCRError
 from app.storage import LocalDocumentStorage
 
 
@@ -64,10 +67,11 @@ def test_docx_upload_preview_attach_download_and_reuse_guard(environment, tmp_pa
             assert saved.user_id
 
 
-def test_upload_rejects_invalid_docx_and_textless_pdf(environment, tmp_path):
+def test_upload_rejects_invalid_docx_and_queues_scanned_pdf(environment, tmp_path):
     sessions, factory = environment
+    storage = LocalDocumentStorage(tmp_path / 'documents')
     with TestClient(create_app(sessions, factory,
-            document_storage=LocalDocumentStorage(tmp_path / 'documents'))) as client:
+            document_storage=storage)) as client:
         invalid = client.post('/api/documents', params={'filename': 'lesson.docx'}, content=b'not a zip')
         assert invalid.status_code == 422
         assert 'DOCX' in invalid.json()['detail']
@@ -77,9 +81,27 @@ def test_upload_rejects_invalid_docx_and_textless_pdf(environment, tmp_path):
         writer.add_blank_page(width=200, height=200)
         writer.write(output)
         scanned = client.post('/api/documents', params={'filename': 'scan.pdf'}, content=output.getvalue())
-        assert scanned.status_code == 422
-        assert 'OCR' in scanned.json()['detail']
-        assert not (tmp_path / 'documents').exists()
+        assert scanned.status_code == 202
+        document = scanned.json()
+        assert document['parse_status'] == 'queued'
+        assert document['processing']['status'] == 'QUEUED'
+        assert client.post('/api/sessions', json=payload(document['id'])).status_code == 409
+
+        class FakeOCR:
+            def extract(self, content, progress=None):
+                assert content == output.getvalue()
+                progress(1, 1)
+                return ParsedDocument('教学目标\n学生理解分数。', 'application/pdf', 'fake-ocr-v1', 1)
+
+        assert OCRWorker(sessions, storage, FakeOCR()).run_once() is True
+        completed = client.get(f"/api/documents/{document['id']}")
+        assert completed.status_code == 200
+        assert completed.json()['parse_status'] == 'parsed'
+        assert completed.json()['text'] == '教学目标\n学生理解分数。'
+        with sessions() as db:
+            job = db.scalar(select(DocumentProcessingJob).where(
+                DocumentProcessingJob.document_id == document['id']))
+            assert job.status == 'SUCCEEDED' and job.current_page == 1
 
 
 def test_upload_rejects_unsupported_extension(environment, tmp_path):
@@ -89,3 +111,25 @@ def test_upload_rejects_unsupported_extension(environment, tmp_path):
         response = client.post('/api/documents', params={'filename': 'lesson.doc'}, content=b'legacy word')
         assert response.status_code == 422
         assert '.docx' in response.json()['detail']
+
+
+def test_failed_ocr_can_be_requeued(environment, tmp_path):
+    sessions, factory = environment
+    storage = LocalDocumentStorage(tmp_path / 'documents')
+    output = BytesIO()
+    writer = PdfWriter(); writer.add_blank_page(width=200, height=200); writer.write(output)
+
+    class FailingOCR:
+        def extract(self, content, progress=None):
+            raise OCRError('OCR_TIMEOUT', '识别超时')
+
+    with TestClient(create_app(sessions, factory, document_storage=storage)) as client:
+        uploaded = client.post('/api/documents', params={'filename': 'scan.pdf'}, content=output.getvalue()).json()
+        OCRWorker(sessions, storage, FailingOCR()).run_once()
+        failed = client.get(f"/api/documents/{uploaded['id']}").json()
+        assert failed['parse_status'] == 'failed'
+        assert failed['processing']['error_code'] == 'OCR_TIMEOUT'
+        retried = client.post(f"/api/documents/{uploaded['id']}/retry")
+        assert retried.status_code == 200
+        assert retried.json()['parse_status'] == 'queued'
+        assert retried.json()['processing']['status'] == 'QUEUED'

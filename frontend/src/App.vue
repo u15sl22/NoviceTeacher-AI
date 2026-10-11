@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { request, uploadDocument } from "./api";
 import { sample } from "./sample";
 
@@ -20,6 +20,9 @@ const recoveryId = ref(savedId.value);
 const pendingKey = ref(localStorage.getItem("pedago.pending-key") || "");
 const selectedVersion = ref(null);
 const mySessions = ref([]), currentUser = ref(null), capabilities = ref(null);
+const analysisPlan = ref(null);
+let generationPollTimer = null;
+let documentPollTimer = null;
 async function loadHistory() {
   currentUser.value = await request('/me');
   mySessions.value = await request('/sessions');
@@ -55,6 +58,12 @@ const canNext = computed(
   () =>
     current.value?.review.generated_at &&
     current.value.suggestions.every((s) => s.decision),
+);
+const generationPending = computed(() =>
+  ["QUEUED", "RUNNING"].includes(state.value?.generation_job?.status),
+);
+const ocrPending = computed(() =>
+  ["queued", "processing"].includes(uploadedDocument.value?.parse_status),
 );
 const path = computed(() => "/sessions/" + state.value?.session.id);
 const finalContent = computed(() =>
@@ -118,9 +127,28 @@ async function recover(id = savedId.value) {
       ),
     );
     await logView();
+    scheduleGenerationPoll();
   });
 }
+function scheduleGenerationPoll() {
+  if (generationPollTimer) clearTimeout(generationPollTimer);
+  if (!generationPending.value) return;
+  generationPollTimer = setTimeout(pollGeneration, 1200);
+}
+async function pollGeneration() {
+  if (!state.value || !generationPending.value) return;
+  try {
+    const data = await request(path.value + "/current-state");
+    persistState(data);
+    if (generationPending.value) scheduleGenerationPoll();
+    else await logView();
+  } catch (e) {
+    error.value = e.message;
+    scheduleGenerationPoll();
+  }
+}
 function useSample() {
+  if (documentPollTimer) clearTimeout(documentPollTimer);
   uploadedDocument.value = null;
   const model_profile = form.value.model_profile;
   form.value = {
@@ -149,15 +177,51 @@ async function selectDocument(event) {
   try {
     const parsed = await uploadDocument(file);
     uploadedDocument.value = parsed;
-    form.value.content = parsed.text;
     if (!form.value.topic.trim())
       form.value.topic = parsed.filename.replace(/\.(docx|pdf)$/i, "");
-    ElMessage.success("文件已保存，正文已提取，请确认后开始修订");
+    if (parsed.parse_status === "parsed") {
+      form.value.content = parsed.text;
+      ElMessage.success("文件已保存，正文已提取，请确认后开始修订");
+    } else {
+      form.value.content = "";
+      ElMessage.info("扫描 PDF 已保存，正在后台识别文字");
+      scheduleDocumentPoll();
+    }
   } catch (e) {
     error.value = e.message;
   } finally {
     documentBusy.value = false;
   }
+}
+function scheduleDocumentPoll() {
+  if (documentPollTimer) clearTimeout(documentPollTimer);
+  if (!ocrPending.value || !uploadedDocument.value?.id) return;
+  documentPollTimer = setTimeout(pollDocument, 1200);
+}
+async function pollDocument() {
+  if (!uploadedDocument.value?.id || !ocrPending.value) return;
+  try {
+    const document = await request("/documents/" + uploadedDocument.value.id);
+    uploadedDocument.value = document;
+    if (document.parse_status === "parsed") {
+      form.value.content = document.text;
+      ElMessage.success("OCR 已完成，请校对识别后的正文");
+    } else if (document.parse_status === "failed") {
+      error.value = document.error || "OCR 识别失败，可以重试。";
+    } else scheduleDocumentPoll();
+  } catch (e) {
+    error.value = e.message;
+    scheduleDocumentPoll();
+  }
+}
+async function retryOcr() {
+  await run(async () => {
+    uploadedDocument.value = await request(
+      "/documents/" + uploadedDocument.value.id + "/retry",
+      {},
+    );
+    scheduleDocumentPoll();
+  });
 }
 async function start() {
   if (Object.values(form.value).some((v) => !v.trim())) {
@@ -170,14 +234,33 @@ async function start() {
     let payload;
     if (pendingKey.value && cached) payload = JSON.parse(cached);
     else {
+      const metadata = {
+        subject: form.value.subject,
+        grade: form.value.grade,
+        topic: form.value.topic,
+      };
+      const plan = await request("/analysis-plan", {
+        metadata,
+        content: form.value.content,
+        model_profile: form.value.model_profile || null,
+      });
+      analysisPlan.value = plan;
+      if (!plan.processable) throw new Error(plan.warnings.join(" "));
+      if (plan.requires_confirmation) {
+        try {
+          await ElMessageBox.confirm(
+            `这份教案会保留为 ${plan.section_count} 个教师可见单元，并拆成 ${plan.analysis_chunk_count} 个内部分析块，预计至少调用模型 ${plan.estimated_model_calls} 次。是否继续？`,
+            "长教案分析确认",
+            { confirmButtonText: "继续修订", cancelButtonText: "返回精简" },
+          );
+        } catch {
+          return;
+        }
+      }
       pendingKey.value = crypto.randomUUID();
       payload = {
         request_key: pendingKey.value,
-        metadata: {
-          subject: form.value.subject,
-          grade: form.value.grade,
-          topic: form.value.topic,
-        },
+        metadata,
         content: form.value.content,
         document_id: uploadedDocument.value?.id || null,
         model_profile: form.value.model_profile || null,
@@ -198,11 +281,18 @@ async function mutate(suffix, body = {}) {
     await logView();
   });
 }
+async function generateSuggestions() {
+  await mutate("/suggestions", target());
+  scheduleGenerationPoll();
+}
 function newLesson() {
+  if (generationPollTimer) clearTimeout(generationPollTimer);
+  if (documentPollTimer) clearTimeout(documentPollTimer);
   state.value = null;
   selectedVersion.value = null;
   error.value = "";
   uploadedDocument.value = null;
+  analysisPlan.value = null;
   history.replaceState(null, "", location.pathname);
   run(loadHistory);
 }
@@ -365,7 +455,7 @@ onMounted(async () => {
                 />
                 <div>
                   <strong>从 Word / PDF 导入</strong>
-                  <p class="muted">支持 DOCX 和文本型 PDF，最大 15 MB。扫描版 PDF 需要先做 OCR。</p>
+                  <p class="muted">支持 DOCX、文本型 PDF 和扫描 PDF，最大 15 MB。扫描页会在服务器后台 OCR。</p>
                 </div>
                 <el-button
                   :loading="documentBusy"
@@ -376,15 +466,25 @@ onMounted(async () => {
               <div v-if="uploadedDocument" class="document-result">
                 <div>
                   <strong>{{ uploadedDocument.filename }}</strong>
-                  <p class="muted">
+                  <p v-if="uploadedDocument.parse_status === 'parsed'" class="muted">
                     已安全保存<span v-if="uploadedDocument.char_count"> · 提取 {{ uploadedDocument.char_count }} 字</span><span v-if="uploadedDocument.page_count"> · {{ uploadedDocument.page_count }} 页</span> · 可在下方校对正文
                   </p>
+                  <p v-else-if="ocrPending" class="muted">
+                    {{ uploadedDocument.parse_status === 'queued' ? '等待 OCR Worker' : '正在识别' }}
+                    <span v-if="uploadedDocument.processing?.total_pages"> · {{ uploadedDocument.processing.current_page }} / {{ uploadedDocument.processing.total_pages }} 页</span>
+                  </p>
+                  <p v-else class="muted">OCR 失败：{{ uploadedDocument.error || uploadedDocument.processing?.error_code }}</p>
                 </div>
                 <a
                   v-if="uploadedDocument.id && uploadedDocument.filename !== '已上传的源文件'"
                   :href="'/api/documents/' + uploadedDocument.id + '/download'"
                   download
                 >下载原文件</a>
+                <el-button
+                  v-if="uploadedDocument.parse_status === 'failed'"
+                  size="small"
+                  @click="retryOcr"
+                >重试 OCR</el-button>
               </div>
               <el-form-item label="教案正文"
                 ><el-input
@@ -401,12 +501,12 @@ onMounted(async () => {
               有一份待确认的提交，重试会使用原提交编号，避免创建重复会话。
             </p>
             <div class="panel-footer">
-              <span class="muted">自动识别教学单元 · 支持粘贴文本、DOCX、文本型 PDF</span
+              <span class="muted">自动识别教学单元 · 支持粘贴文本、DOCX、文本型或扫描 PDF</span
               ><el-button
                 type="primary"
                 size="large"
-                :loading="busy || documentBusy"
-                :disabled="documentBusy"
+                :loading="busy || documentBusy || ocrPending"
+                :disabled="documentBusy || ocrPending || uploadedDocument?.parse_status === 'failed'"
                 @click="start"
                 >{{ pendingKey ? "重试原提交" : "开始修订" }} →</el-button
               >
@@ -565,14 +665,42 @@ onMounted(async () => {
               >
                 <h3>从这个单元开始思考</h3>
                 <p class="muted">
-                  结合课题与当前内容，生成 0–2 条可供你判断的建议。
+                  <template v-if="generationPending">
+                    后台正在分析当前单元。你可以关闭页面，任务完成后仍可恢复结果。
+                  </template>
+                  <template v-else>
+                    结合课题与当前内容，生成 0–2 条可供你判断的建议。
+                  </template>
                 </p>
+                <el-alert
+                  v-if="state.generation_job?.status === 'FAILED'"
+                  type="error"
+                  :closable="false"
+                  :title="`后台生成失败（${state.generation_job.error_code || '未知错误'}），可以重新提交。`"
+                  style="margin-bottom: 16px"
+                />
+                <el-alert
+                  v-if="state.generation_job?.status === 'STALE'"
+                  type="warning"
+                  :closable="false"
+                  title="生成期间教案版本发生变化，旧结果未写入。请按当前版本重新生成。"
+                  style="margin-bottom: 16px"
+                />
                 <el-button
                   type="primary"
-                  :loading="busy"
-                  @click="mutate('/suggestions', target())"
+                  :loading="busy || generationPending"
+                  :disabled="generationPending"
+                  @click="generateSuggestions"
                   >{{
-                    provider === "mock" ? "生成模拟建议" : "生成 AI 建议"
+                    generationPending
+                      ? state.generation_job.status === "QUEUED"
+                        ? "等待后台处理"
+                        : "后台生成中"
+                      : provider === "mock"
+                        ? "生成模拟建议"
+                        : ["FAILED", "STALE"].includes(state.generation_job?.status)
+                          ? "重新生成 AI 建议"
+                          : "生成 AI 建议"
                   }}</el-button
                 >
               </div>

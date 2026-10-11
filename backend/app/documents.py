@@ -17,6 +17,12 @@ class DocumentParseError(ValueError):
     pass
 
 
+class OCRRequired(DocumentParseError):
+    def __init__(self, page_count: int):
+        super().__init__('扫描版或部分扫描 PDF 需要 OCR。')
+        self.page_count = page_count
+
+
 @dataclass(frozen=True)
 class ParsedDocument:
     text: str
@@ -78,7 +84,7 @@ def _docx(content: bytes) -> ParsedDocument:
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx-xml-v1')
 
 
-def _pdf(content: bytes) -> ParsedDocument:
+def pdf_page_texts(content: bytes) -> list[str]:
     if not content.startswith(b'%PDF-'):
         raise DocumentParseError('文件内容不是有效的 PDF。')
     try:
@@ -91,18 +97,24 @@ def _pdf(content: bytes) -> ParsedDocument:
                 raise DocumentParseError('加密 PDF 暂不支持，请先移除密码。') from exc
         if len(reader.pages) > MAX_PDF_PAGES:
             raise DocumentParseError(f'PDF 超过 {MAX_PDF_PAGES} 页。')
-        pages = [(page.extract_text() or '').strip() for page in reader.pages]
+        return [(page.extract_text() or '').strip() for page in reader.pages]
     except DocumentParseError:
         raise
     except Exception as exc:
         raise DocumentParseError('PDF 文件损坏或无法解析。') from exc
-    return ParsedDocument(_finish('\n\n'.join(pages)), 'application/pdf', 'pypdf-6.19.0', len(reader.pages))
 
 
-def parse_document(content: bytes, filename: str) -> ParsedDocument:
+def _pdf(content: bytes, min_text_chars_per_page: int = 20) -> ParsedDocument:
+    pages = pdf_page_texts(content)
+    if any(len(''.join(page.split())) < min_text_chars_per_page for page in pages):
+        raise OCRRequired(len(pages))
+    return ParsedDocument(_finish('\n\n'.join(pages)), 'application/pdf', 'pypdf-6.19.0', len(pages))
+
+
+def parse_document(content: bytes, filename: str, min_pdf_text_chars_per_page: int = 20) -> ParsedDocument:
     suffix = Path(filename).suffix.lower()
     if suffix == '.docx':
         return _docx(content)
     if suffix == '.pdf':
-        return _pdf(content)
+        return _pdf(content, min_pdf_text_chars_per_page)
     raise DocumentParseError('仅支持 .docx 和 .pdf 文件。')

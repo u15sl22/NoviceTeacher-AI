@@ -2,9 +2,9 @@ from .context import ContextPipeline, ContextAssembler
 
 
 class PipelineContextEngine:
-    def __init__(self, contributors, max_tokens):
+    def __init__(self, contributors, max_bytes):
         self.pipeline = ContextPipeline(contributors)
-        self.assembler = ContextAssembler(max_tokens)
+        self.assembler = ContextAssembler(max_bytes)
     def prepare(self, request, audit):
         fragments = self.pipeline.build(request)
         for fragment in fragments:

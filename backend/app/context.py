@@ -63,8 +63,8 @@ class ContextPipeline:
 
 
 class ContextAssembler:
-    def __init__(self, max_tokens):
-        self.max_tokens = max_tokens
+    def __init__(self, max_bytes):
+        self.max_bytes = max_bytes
 
     @staticmethod
     def estimate(value):
@@ -76,7 +76,7 @@ class ContextAssembler:
         reserve = self.estimate(SYSTEM_PROMPT) + 128
         for fragment in sorted(fragments, key=lambda f: (not f.required, f.retention_priority, f.priority)):
             candidate = kept + [fragment]
-            if reserve + self.estimate([f.model_dump() for f in candidate]) > self.max_tokens:
+            if reserve + self.estimate([f.model_dump() for f in candidate]) > self.max_bytes:
                 if fragment.required:
                     raise ProviderError('CONTEXT_BUDGET', '当前单元超过上下文预算，未截断正文。请增大预算或新建更短的教案。')
                 omitted.append(fragment.contributor_type)
@@ -84,4 +84,5 @@ class ContextAssembler:
                 kept.append(fragment)
         kept.sort(key=lambda f: f.priority)
         return LLMContext(system=SYSTEM_PROMPT, user={'fragments': [f.model_dump() for f in kept],
-            'budget': {'max_tokens': self.max_tokens, 'estimator': 'utf8_bytes_upper_bound', 'omitted': omitted}})
+            'budget': {'max_bytes': self.max_bytes, 'unit': 'utf8_bytes',
+                       'estimator': 'utf8_bytes_upper_bound', 'omitted': omitted}})

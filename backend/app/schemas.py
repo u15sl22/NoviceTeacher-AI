@@ -21,6 +21,12 @@ class CreateSession(BaseModel):
     model_profile: str | None = Field(default=None, pattern=r'^[a-z0-9][a-z0-9_-]{0,49}$')
 
 
+class AnalysisPlanRequest(BaseModel):
+    metadata: LessonMetadata
+    content: str = Field(min_length=1, max_length=100000)
+    model_profile: str | None = Field(default=None, pattern=r'^[a-z0-9][a-z0-9_-]{0,49}$')
+
+
 class Decide(BaseModel):
     decision: Literal['ACCEPT', 'REJECT']
     confirm_append: bool = False
