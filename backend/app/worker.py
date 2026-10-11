@@ -83,17 +83,27 @@ class GenerationWorker:
             section = workflow.one(m.Section, id=job.section_id)
             review = workflow.one(m.SectionReview, round_id=job.round_id, section_id=job.section_id)
             generation = workflow.one(m.GenerationRecord, id=job.generation_id)
+            parent = workflow.one(m.Suggestion, id=generation.parent_suggestion_id) if generation.parent_suggestion_id else None
+            custom = workflow.one(m.CustomPrompt, id=generation.custom_prompt_id) if generation.custom_prompt_id else None
             latest = workflow.latest(job.section_id)
             now = m.now()
-            if (not round or not section or not review or review.generated_at or session.status != 'ACTIVE'
-                    or session.current_section_id != job.section_id or latest.id != job.section_version_id):
+            invalid = (not round or not section or not review or session.status != 'ACTIVE'
+                    or session.current_section_id != job.section_id or latest.id != job.section_version_id)
+            if generation.generation_kind == 'INITIAL':
+                invalid = invalid or review.generated_at
+            else:
+                decision = workflow.one(m.Decision, suggestion_id=parent.id) if parent else None
+                child = workflow.one(m.Suggestion, parent_suggestion_id=parent.id) if parent else None
+                invalid = invalid or not parent or not custom or not decision or decision.decision != 'CUSTOM' or bool(child)
+            if invalid:
                 job.status, job.finished_at, job.lease_expires_at = 'STALE', now, None
                 generation.raw_response = raw
                 workflow.event(session, 'SUGGESTION_GENERATION_STALE', {'job_id': job.id,
                     'expected_section_version_id': job.section_version_id,
                     'current_section_version_id': latest.id if latest else None}, job.round_id, job.section_id)
                 return
-            audit = GenerationAudit(workflow, session, round, section, review)
+            audit = GenerationAudit(workflow, session, round, section, review,
+                generation.generation_kind, parent, custom)
             audit.load_sources(job.context_json)
             if error:
                 audit.failed(generation, error)

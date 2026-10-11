@@ -486,17 +486,43 @@ h3 {
   margin-left: auto;
   font-size: 11px;
 }
-.inquiry-placeholder {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #8f978d;
-  margin: 28px 0;
+.custom-prompt-box {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid #dce6d8;
+  border-radius: 8px;
+  background: #f8faf6;
 }
-.inquiry-placeholder .el-input {
-  margin-top: 3px;
+.custom-prompt-box label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+.custom-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.custom-prompt-box .muted {
+  margin: 10px 0 0;
+  font-size: 11px;
+}
+.suggestion-history {
+  margin-top: 16px;
+}
+.history-attempt {
+  padding: 12px 0;
+  border-bottom: 1px solid #edf0e9;
+}
+.history-attempt p {
+  white-space: pre-wrap;
+}
+.custom-instruction {
+  color: #58705b;
+  background: #f2f6ef;
+  padding: 10px 12px;
 }
 .next-bar {
   display: flex;

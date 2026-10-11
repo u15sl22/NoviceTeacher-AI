@@ -109,3 +109,27 @@ test("mobile input fits viewport and recovers from a network error", async ({
   ).toBeTruthy();
   await page.screenshot({ path: "../.runtime/mobile.png", fullPage: true });
 });
+
+test("custom suggestion can be refined repeatedly before acceptance", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("课题", { exact: true }).fill("自定义建议测试");
+  await page.getByLabel("教案正文", { exact: true }).fill("教学目标\n理解分数。");
+  await page.getByRole("button", { name: "开始修订" }).click();
+  await page.getByRole("button", { name: "生成模拟建议" }).click();
+
+  await page.getByRole("button", { name: "□ 自定义修改" }).first().click();
+  await page.getByPlaceholder("例如：问题判断是对的", { exact: false }).fill("请缩短为五分钟。 ");
+  await page.getByRole("button", { name: "让 AI 重新生成" }).click();
+  await expect(page.getByText("查看此前 1 版候选与自定义要求")).toBeVisible();
+
+  await page.getByRole("button", { name: "□ 自定义修改" }).first().click();
+  await page.getByPlaceholder("例如：问题判断是对的", { exact: false }).fill("请改成个人书面活动。 ");
+  await page.getByRole("button", { name: "让 AI 重新生成" }).click();
+  await expect(page.getByText("查看此前 2 版候选与自定义要求")).toBeVisible();
+
+  await page.getByRole("button", { name: "Yes · 采纳" }).first().click();
+  await expect(page.getByText("已采纳", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "No · 拒绝" })).toHaveCount(1);
+  await page.getByRole("button", { name: "No · 拒绝" }).click();
+  await expect(page.getByRole("button", { name: "完成本轮", exact: false })).toBeEnabled();
+});

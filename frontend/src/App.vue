@@ -19,6 +19,9 @@ const savedId = ref(
 const recoveryId = ref(savedId.value);
 const pendingKey = ref(localStorage.getItem("pedago.pending-key") || "");
 const selectedVersion = ref(null);
+const customizingId = ref("");
+const customPromptText = ref("");
+const customRequest = ref(null);
 const mySessions = ref([]), currentUser = ref(null), capabilities = ref(null);
 const analysisPlan = ref(null);
 let generationPollTimer = null;
@@ -57,7 +60,9 @@ const completed = computed(
 const canNext = computed(
   () =>
     current.value?.review.generated_at &&
-    current.value.suggestions.every((s) => s.decision),
+    current.value.suggestions.every((s) =>
+      ["ACCEPT", "REJECT"].includes(s.decision?.decision),
+    ),
 );
 const generationPending = computed(() =>
   ["QUEUED", "RUNNING"].includes(state.value?.generation_job?.status),
@@ -285,6 +290,43 @@ async function generateSuggestions() {
   await mutate("/suggestions", target());
   scheduleGenerationPoll();
 }
+function openCustomPrompt(suggestion) {
+  customizingId.value = suggestion.id;
+  customPromptText.value = "";
+  customRequest.value = null;
+}
+async function submitCustomPrompt(suggestion) {
+  const prompt = customPromptText.value.trim();
+  if (!prompt) {
+    error.value = "请先填写你希望 AI 如何重新修改。";
+    return;
+  }
+  if (!customRequest.value || customRequest.value.prompt_text !== prompt || customRequest.value.suggestion_id !== suggestion.id) {
+    customRequest.value = {
+      suggestion_id: suggestion.id,
+      prompt_text: prompt,
+      request_key: crypto.randomUUID(),
+    };
+  }
+  await run(async () => {
+    const pending = customRequest.value;
+    persistState(await request(
+      path.value + "/suggestions/" + suggestion.id + "/custom-prompt",
+      { request_key: pending.request_key, prompt_text: pending.prompt_text },
+    ));
+    customizingId.value = "";
+    customPromptText.value = "";
+    customRequest.value = null;
+    await logView();
+    scheduleGenerationPoll();
+  });
+}
+async function retryCustomPrompt() {
+  const parentId = state.value?.generation_job?.parent_suggestion_id;
+  if (!parentId) return;
+  await mutate("/suggestions/" + parentId + "/custom-prompt/retry");
+  scheduleGenerationPoll();
+}
 function newLesson() {
   if (generationPollTimer) clearTimeout(generationPollTimer);
   if (documentPollTimer) clearTimeout(documentPollTimer);
@@ -293,6 +335,9 @@ function newLesson() {
   error.value = "";
   uploadedDocument.value = null;
   analysisPlan.value = null;
+  customizingId.value = "";
+  customPromptText.value = "";
+  customRequest.value = null;
   history.replaceState(null, "", location.pathname);
   run(loadHistory);
 }
@@ -704,8 +749,24 @@ onMounted(async () => {
                   }}</el-button
                 >
               </div>
+              <el-alert
+                v-if="current.review.generated_at && state.generation_job?.generation_kind === 'REFINEMENT' && state.generation_job?.status === 'FAILED'"
+                type="error"
+                :closable="false"
+                :title="`自定义生成失败（${state.generation_job.error_code || '未知错误'}）。你的要求已经保存，可以重试。`"
+                style="margin-bottom: 16px"
+              >
+                <el-button :disabled="busy" @click="retryCustomPrompt">重试自定义生成</el-button>
+              </el-alert>
+              <el-alert
+                v-if="current.review.generated_at && state.generation_job?.generation_kind === 'REFINEMENT' && state.generation_job?.status === 'STALE'"
+                type="warning"
+                :closable="false"
+                title="生成期间正文版本发生变化。当前候选未写入，请恢复最新状态。"
+                style="margin-bottom: 16px"
+              />
               <div
-                v-else-if="!current.suggestions.length"
+                v-if="current.review.generated_at && !current.suggestions.length"
                 class="panel empty-suggestions"
               >
                 <h3>本单元暂无新增建议</h3>
@@ -729,7 +790,9 @@ onMounted(async () => {
                     >{{
                       suggestion.decision.decision === "ACCEPT"
                         ? "已采纳"
-                        : "已拒绝"
+                        : suggestion.decision.decision === "REJECT"
+                          ? "已拒绝"
+                          : "正在按要求重写"
                     }}</el-tag
                   >
                 </div>
@@ -749,10 +812,19 @@ onMounted(async () => {
                   <dd v-if="suggestion.target_text" class="muted">替换位置：{{ suggestion.target_text }}</dd>
                   <dd class="revision-text">{{ suggestion.revision }}</dd>
                 </dl>
+                <el-collapse v-if="suggestion.history?.length > 1" class="suggestion-history">
+                  <el-collapse-item :title="`查看此前 ${suggestion.history.length - 1} 版候选与自定义要求`">
+                    <div v-for="attempt in suggestion.history.slice(0, -1)" :key="attempt.id" class="history-attempt">
+                      <strong>第 {{ attempt.attempt_number }} 版候选</strong>
+                      <p>{{ attempt.revision }}</p>
+                      <p v-if="attempt.custom_prompt" class="custom-instruction">教师要求：{{ attempt.custom_prompt.prompt_text }}</p>
+                    </div>
+                  </el-collapse-item>
+                </el-collapse>
                 <div v-if="!suggestion.decision" class="decision-actions">
                   <el-button
                     type="primary"
-                    :disabled="busy"
+                    :disabled="busy || generationPending"
                     @click="
                       mutate('/suggestions/' + suggestion.id + '/decision', {
                         decision: 'ACCEPT',
@@ -760,14 +832,29 @@ onMounted(async () => {
                     "
                     >Yes · 采纳</el-button
                   ><el-button
-                    :disabled="busy"
+                    :disabled="busy || generationPending"
                     @click="
                       mutate('/suggestions/' + suggestion.id + '/decision', {
                         decision: 'REJECT',
                       })
                     "
                     >No · 拒绝</el-button
+                  ><el-button
+                    :disabled="busy || generationPending"
+                    @click="openCustomPrompt(suggestion)"
+                    >□ 自定义修改</el-button
                   ><span class="muted">{{ suggestion.revision_mode === 'replace' ? '仅在原文定位唯一时替换' : '采纳后将追加到本单元' }}</span>
+                </div>
+                <div v-if="customizingId === suggestion.id && !suggestion.decision" class="custom-prompt-box">
+                  <label>告诉 AI 这一版哪里需要调整</label>
+                  <el-input v-model="customPromptText" type="textarea" :rows="4"
+                    maxlength="2000" show-word-limit
+                    placeholder="例如：问题判断是对的，但活动太复杂。请改成五分钟内完成，并且不要使用小组讨论。" />
+                  <div class="custom-prompt-actions">
+                    <el-button :disabled="busy" @click="customizingId = ''">取消</el-button>
+                    <el-button type="primary" :loading="busy" @click="submitCustomPrompt(suggestion)">让 AI 重新生成</el-button>
+                  </div>
+                  <p class="muted">这会产生一次新的模型调用。旧候选和你的要求会保存在研究记录中，教案正文暂时不会改变。</p>
                 </div>
                 <div v-if="state.revision_candidate?.suggestion_id === suggestion.id && !suggestion.decision" class="candidate-box">
                   <p>{{ state.revision_candidate.reason }}</p><pre class="lesson-text">{{ state.revision_candidate.candidate }}</pre>
@@ -775,17 +862,14 @@ onMounted(async () => {
                 </div>
               </article>
             </section>
-            <div class="inquiry-placeholder">
-              <span>主动探询 / Custom prompt</span
-              ><el-tag type="info" effect="plain">后续研究开放</el-tag
-              ><el-input disabled placeholder="此演示版本暂未启用主动探询" />
-            </div>
             <div class="next-bar">
               <p class="muted">
                 {{
                   canNext
                     ? "本单元的决定已保存，可以继续。"
-                    : "请生成建议，并对每条建议作出选择。"
+                    : generationPending
+                      ? "AI 正在生成候选，请稍候。"
+                      : "请对每条当前建议选择采纳、拒绝或自定义修改。"
                 }}
               </p>
               <el-button

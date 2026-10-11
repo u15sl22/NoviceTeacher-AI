@@ -4,7 +4,7 @@
 
 四个常驻容器：`app`（Vue 构建文件 + FastAPI）、`worker`（异步模型生成）、`ocr-worker`（本地扫描 PDF 识别）和 `db`（PostgreSQL 17）。`migrate` 为一次性数据库结构升级任务；`maintenance` 是按需执行的管理工具容器，不常驻。前端不运行 Vite 开发服务器。
 
-已在 Windows Docker Desktop 上完成 PostgreSQL、Alembic、应用健康检查、历史迁移和真实扫描 PDF 验证。本地后端 **80 passed**，容器 PostgreSQL **79 passed、1 skipped**，前端构建和 Compose 配置解析通过；app、worker、ocr-worker、db 现场启动正常，migrate 退出码为 0，业务库已升级到 `d8a41c9e72b3`。一份 4 页真实扫描教案经上传、排队和 Worker 识别后生成 2539 字正文。跨主机恢复脚本已完成自动化测试，正式上服务器时仍应按第 5、6 节完成一次目标主机恢复演练和人工验收。
+已在 Windows Docker Desktop 上完成 PostgreSQL、Alembic、应用健康检查、历史迁移、连续自定义建议链和真实扫描 PDF 验证。本地后端 **83 passed**，容器 PostgreSQL **82 passed、1 skipped**，前端构建、连续自定义浏览器测试和 Compose 配置解析通过；app、worker、ocr-worker、db 现场启动正常，migrate 退出码为 0，业务库已升级到 `f6c3b9d1e824`。升级前先用包含 9 个会话的业务库副本演练迁移，旧建议全部完成 thread 回填。一份 4 页真实扫描教案经上传、排队和 Worker 识别后生成 2539 字正文。跨主机恢复脚本已完成自动化测试，正式上服务器时仍应按第 5、6 节完成一次目标主机恢复演练和人工验收。
 
 ## 1. 首次启动（全新数据库）
 

@@ -165,6 +165,9 @@ class GenerationRecord(Owned, Record, Base):
     runtime_context: Mapped[dict] = mapped_column(json_type)
     raw_response: Mapped[dict | None] = mapped_column(json_type)
     error_code: Mapped[str | None] = mapped_column(String(100))
+    generation_kind: Mapped[str] = mapped_column(String(20), default='INITIAL')
+    parent_suggestion_id: Mapped[str | None] = mapped_column(String(36))
+    custom_prompt_id: Mapped[str | None] = mapped_column(String(36))
 
 
 class GenerationJob(Owned, Record, Base):
@@ -190,8 +193,9 @@ class GenerationJob(Owned, Record, Base):
 
 class Suggestion(Owned, Record, Base):
     __tablename__ = 'suggestions'
-    __table_args__ = (UniqueConstraint('round_id', 'section_id', 'suggestion_index'),
-                     CheckConstraint('suggestion_index BETWEEN 1 AND 2'))
+    __table_args__ = (UniqueConstraint('thread_id', 'attempt_number'),
+                     CheckConstraint('suggestion_index BETWEEN 1 AND 2'),
+                     CheckConstraint('attempt_number >= 1'))
     section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
     generation_id: Mapped[str] = mapped_column(ForeignKey('generation_records.id'))
@@ -209,11 +213,14 @@ class Suggestion(Owned, Record, Base):
     revision_mode: Mapped[str] = mapped_column(String(20), default='append')
     knowledge_ids: Mapped[list] = mapped_column(json_type, default=list)
     basis_sources: Mapped[list] = mapped_column(json_type, default=list)
+    thread_id: Mapped[str] = mapped_column(String(36), index=True)
+    parent_suggestion_id: Mapped[str | None] = mapped_column(ForeignKey('suggestions.id'))
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class Decision(Owned, Record, Base):
     __tablename__ = 'decisions'
-    __table_args__ = (CheckConstraint("decision IN ('ACCEPT','REJECT')"),)
+    __table_args__ = (CheckConstraint("decision IN ('ACCEPT','REJECT','CUSTOM')"),)
     suggestion_id: Mapped[str] = mapped_column(ForeignKey('suggestions.id'), unique=True)
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
@@ -223,10 +230,14 @@ class Decision(Owned, Record, Base):
 
 class CustomPrompt(Owned, Record, Base):
     __tablename__ = 'custom_prompts'
+    __table_args__ = (UniqueConstraint('user_id', 'request_key'), UniqueConstraint('suggestion_id'))
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id'), index=True)
     round_id: Mapped[str] = mapped_column(ForeignKey('rounds.id'))
     section_id: Mapped[str] = mapped_column(ForeignKey('sections.id'))
     prompt_text: Mapped[str] = mapped_column(Text)
+    request_key: Mapped[str] = mapped_column(String(36))
+    suggestion_id: Mapped[str] = mapped_column(ForeignKey('suggestions.id'))
+    generation_id: Mapped[str | None] = mapped_column(ForeignKey('generation_records.id'), unique=True)
 
 
 class RetrievalRecord(Owned, Record, Base):

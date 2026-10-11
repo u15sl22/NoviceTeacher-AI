@@ -33,6 +33,11 @@ class Decide(BaseModel):
     expected_version_id: UUID | None = None
 
 
+class CustomPromptRequest(BaseModel):
+    request_key: UUID
+    prompt_text: str = Field(min_length=1, max_length=2000)
+
+
 class ReviewTarget(BaseModel):
     round_id: UUID
     section_id: UUID

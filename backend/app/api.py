@@ -12,7 +12,7 @@ from sqlalchemy import text, select, func
 from sqlalchemy.exc import IntegrityError, OperationalError
 from .db import SessionLocal
 from .settings import settings
-from .schemas import AnalysisPlanRequest, CreateSession, Decide, ReviewTarget, ViewAck
+from .schemas import AnalysisPlanRequest, CreateSession, CustomPromptRequest, Decide, ReviewTarget, ViewAck
 from .providers.config import ExperimentConfigFactory
 from .workflow import Workflow, WorkflowError
 from .auth import AUTH_PROVIDERS
@@ -229,6 +229,26 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
                                  str(data.expected_version_id) if data.expected_version_id else None)
             return {**w.get_current_state(session), 'revision_candidate': candidate} if candidate else w.get_current_state(session)
 
+    @app.post('/api/sessions/{session_id}/suggestions/{suggestion_id}/custom-prompt')
+    def custom_prompt(request: Request, session_id: UUID, suggestion_id: UUID, data: CustomPromptRequest):
+        with transaction(request) as w:
+            session = w.session(str(session_id))
+            job, error = w.customize(session, str(suggestion_id), data.prompt_text, str(data.request_key))
+            state = w.get_current_state(session)
+        if error:
+            return JSONResponse(status_code=502, content={'detail': str(error), 'code': error.code})
+        if job:
+            return JSONResponse(status_code=202, content=jsonable_encoder(state))
+        return state
+
+    @app.post('/api/sessions/{session_id}/suggestions/{suggestion_id}/custom-prompt/retry')
+    def retry_custom_prompt(request: Request, session_id: UUID, suggestion_id: UUID):
+        with transaction(request) as w:
+            session = w.session(str(session_id))
+            w.retry_custom(session, str(suggestion_id))
+            state = w.get_current_state(session)
+        return JSONResponse(status_code=202, content=jsonable_encoder(state))
+
     @app.post('/api/sessions/{session_id}/complete-section')
     def complete_section(request: Request, session_id: UUID, target: ReviewTarget):
         with transaction(request) as w:
@@ -264,12 +284,6 @@ def create_app(session_factory=SessionLocal, config_factory=None, auth_provider=
             result = w.export(w.session(str(session_id)))
         return JSONResponse(content=jsonable_encoder(result), headers={
             'Content-Disposition': f'attachment; filename="pedago-loop-{session_id}.json"'})
-
-    @app.post('/api/sessions/{session_id}/custom-prompt')
-    def inquiry(request: Request, session_id: UUID):
-        with transaction(request) as w:
-            w.session(str(session_id))
-            raise WorkflowError('此演示配置未启用主动探询。', 403)
 
     frontend = Path(__file__).resolve().parents[2] / 'frontend' / 'dist'
     if frontend.exists():

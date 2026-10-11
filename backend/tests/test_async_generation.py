@@ -123,3 +123,78 @@ def test_long_section_has_preflight_and_bounded_chunks(tmp_path):
             assert len(current(finished)['suggestions']) == 1
     finally:
         engine.dispose()
+
+
+def test_custom_refinement_uses_worker_and_restores_chain(tmp_path):
+    engine, sessions, factory, provider = generic_environment(tmp_path)
+    try:
+        with TestClient(create_app(sessions, factory)) as client:
+            state = client.post('/api/sessions', json=payload()).json()
+            assert client.post(f"/api/sessions/{state['session']['id']}/suggestions", json=target(state)).status_code == 202
+            assert GenerationWorker(sessions, factory).run_once() is True
+            state = client.get(f"/api/sessions/{state['session']['id']}/current-state").json()
+            original = current(state)['suggestions'][0]
+
+            queued = client.post(
+                f"/api/sessions/{state['session']['id']}/suggestions/{original['id']}/custom-prompt",
+                json={'request_key': str(uuid4()), 'prompt_text': '保留问题判断，但改成个人练习。'},
+            )
+            assert queued.status_code == 202
+            waiting = queued.json()
+            assert waiting['generation_job']['generation_kind'] == 'REFINEMENT'
+            assert waiting['generation_job']['status'] == 'QUEUED'
+            assert current(waiting)['suggestions'][0]['decision']['decision'] == 'CUSTOM'
+            assert client.post(f"/api/sessions/{state['session']['id']}/complete-section",
+                               json=target(state)).status_code == 409
+
+            assert GenerationWorker(sessions, factory).run_once() is True
+            restored = client.get(f"/api/sessions/{state['session']['id']}/current-state").json()
+            child = current(restored)['suggestions'][0]
+            assert child['parent_suggestion_id'] == original['id']
+            assert child['attempt_number'] == 2
+            assert child['decision'] is None
+            assert len(child['history']) == 2
+            assert provider.calls == 2
+    finally:
+        engine.dispose()
+
+
+def test_stale_custom_refinement_rebuilds_context_before_retry(tmp_path):
+    engine, sessions, factory, provider = generic_environment(tmp_path)
+    try:
+        with TestClient(create_app(sessions, factory)) as client:
+            state = client.post('/api/sessions', json=payload()).json()
+            client.post(f"/api/sessions/{state['session']['id']}/suggestions", json=target(state))
+            GenerationWorker(sessions, factory).run_once()
+            state = client.get(f"/api/sessions/{state['session']['id']}/current-state").json()
+            parent = current(state)['suggestions'][0]
+            queued = client.post(
+                f"/api/sessions/{state['session']['id']}/suggestions/{parent['id']}/custom-prompt",
+                json={'request_key': str(uuid4()), 'prompt_text': '改成个人练习。'},
+            ).json()
+            old_job = queued['generation_job']['id']
+            with sessions.begin() as db:
+                section = db.get(m.Section, target(state)['section_id'])
+                previous = db.get(m.SectionVersion, current(state)['version']['id'])
+                section.current_content += '\n并发加入的最新要求。'
+                db.add(m.SectionVersion(user_id=section.user_id, section_id=section.id, round_number=1,
+                    version_number=previous.version_number + 1, previous_version_id=previous.id,
+                    content=section.current_content))
+
+            GenerationWorker(sessions, factory).run_once()
+            stale = client.get(f"/api/sessions/{state['session']['id']}/current-state").json()
+            assert stale['generation_job']['status'] == 'STALE'
+            retried = client.post(
+                f"/api/sessions/{state['session']['id']}/suggestions/{parent['id']}/custom-prompt/retry",
+                json={},
+            )
+            assert retried.status_code == 202
+            assert retried.json()['generation_job']['id'] != old_job
+            assert GenerationWorker(sessions, factory).run_once() is True
+            finished = client.get(f"/api/sessions/{state['session']['id']}/current-state").json()
+            assert current(finished)['suggestions'][0]['attempt_number'] == 2
+            export = client.get(f"/api/sessions/{state['session']['id']}/export").json()
+            refinements = [item for item in export['generation_records'] if item['generation_kind'] == 'REFINEMENT']
+            assert len(refinements) == 2
+    finally:
+        engine.dispose()

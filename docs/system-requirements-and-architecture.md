@@ -24,7 +24,7 @@
 
 ## 2. 系统定位
 
-PedagoLoop 是一个面向新手教师的研究型教案修订系统。教师提交已有教案后，系统将教案切分为教学功能单元，逐单元生成最多两条建议。教师对每条建议选择采纳或拒绝，系统保存每一次建议、决定、正文变化、上下文来源和轮次版本。
+PedagoLoop 是一个面向新手教师的研究型教案修订系统。教师提交已有教案后，系统将教案切分为教学功能单元，逐单元生成最多两条建议。教师可采纳、拒绝，或输入自定义要求反复生成候选，直到最终决定。系统保存每一次建议、要求、决定、正文变化、上下文来源和轮次版本。
 
 系统强调的是“教师判断、系统辅助、过程可追踪”，而不是自动替教师重写整份教案。当前版本适合内部试用、教授演示和研究流程验证，尚不能据此声称 AI 建议具有稳定的教学正确性，也不能声称系统已促进教师专业成长。
 
@@ -66,7 +66,7 @@ PedagoLoop 是一个面向新手教师的研究型教案修订系统。教师提
 1. 教师粘贴一份教案并开始修订；
 2. 教师上传 DOCX、文本型或扫描型 PDF，核对提取/OCR 正文后开始修订；
 3. 教师选择已配置的 DeepSeek、智谱或其他兼容模型；
-4. 教师逐节生成建议，采纳或拒绝，再进入下一单元；
+4. 教师逐节生成建议，采纳、拒绝或自定义再生成，最终决定后进入下一单元；
 5. 教师完成一轮后继续下一轮，或结束并查看最终教案；
 6. 教师刷新页面、通过会话编号、历史列表或恢复链接继续工作；
 7. 研究人员导出完整会话记录，用于后续分析；
@@ -98,7 +98,7 @@ PedagoLoop 是一个面向新手教师的研究型教案修订系统。教师提
 | FR-19 | 原始数据集 | 已实现为后台资料 | 已导入 41 份教案元数据和 1118 条原始批注；原始批注默认不进入检索 |
 | FR-20 | 研究审计 | 已实现 | 保存上下文、检索、原始模型返回、建议、决定、版本、事件序列和时间戳 |
 | FR-21 | 会话消息记录 | 部分实现 | 教案提交、模型建议和决定写入 chat_messages；当前没有自由对话界面 |
-| FR-22 | 主动探询 | 占位/未启用 | 接口和 CustomPrompt 表已预留；当前 API 固定返回 403 |
+| FR-22 | 自定义再生成 | 已实现 | 对当前候选提交要求、异步生成下一版，可重复直到最终采纳或拒绝；自由聊天式主动探询仍未实现 |
 | FR-23 | 用户偏好 | 占位/未启用 | 表和 contributor 已预留；默认 NoPreferenceProvider 返回空 |
 | FR-24 | 数据集只读清洗 | 已实现为离线工具 | 不改原始文件、不连业务库、不调用外部模型，生成派生清洗结果和报告 |
 | FR-25 | Docker/PostgreSQL | 已实现 | 应用、模型 Worker、OCR Worker、数据库、迁移和维护工具由 Compose 编排 |
@@ -188,7 +188,7 @@ sequenceDiagram
 
 ### 5.5 建议生成
 
-每个活动单元只允许成功生成一次建议组。生成链路为：
+每个活动单元只允许成功生成一次初始建议组。初始生成链路为：
 
 ```mermaid
 flowchart LR
@@ -222,11 +222,14 @@ flowchart LR
 每条建议必须选择：
 
 - **ACCEPT**：应用修订策略；
-- **REJECT**：保留拒绝记录，不修改正文。
+- **REJECT**：保留拒绝记录，不修改正文；
+- **CUSTOM**：保存教师的自定义要求，创建异步 Refinement 任务，并在同一建议链中产生下一版候选。
 
 追加策略把具体活动或文字追加到当前单元，保留原文。替换策略只有在 `target_text` 在当前单元恰好出现一次时才自动替换。如果无法唯一定位，服务端返回修订候选，不覆盖正文；用户可以确认“作为补充采纳”，但必须携带当前最新版本 ID，防止在其他页面已经改动后误操作。
 
-决定不可反悔修改。重复提交相同决定是幂等的，尝试把已经保存的 ACCEPT 改为 REJECT 或反向修改会返回冲突。
+CUSTOM 是中间决定，可以在新候选上继续 CUSTOM；只有当前建议链的叶子候选最终 ACCEPT 或 REJECT 后，该链才算处理完成。旧候选不能再次操作。每次 Refinement 保存独立 GenerationRecord、ContextSnapshot、模型原始返回和父建议引用。决定不可反悔修改，带 request_key 的重复自定义提交是幂等的。
+
+Refinement 上下文使用当前正文中与上一版建议最相关的内部分析块、上一版候选、原始问题、本次教师要求及正常的已核验知识/案例碎片。完整历史保存在数据库与导出中，但不会无限追加进模型上下文，因此连续自定义不会导致上下文无界增长。教师要求作为受限数据字段进入专用系统提示，不能改变 JSON、引用和安全规则。
 
 ### 5.7 单元、轮次与终止
 
@@ -241,7 +244,7 @@ stateDiagram-v2
     TERMINATED --> [*]
 ```
 
-进入下一单元前，当前单元必须完成建议生成，并对所有实际建议作出决定。0 条建议也需要成功生成记录。最后一个单元完成后，系统保存该轮 LessonPlanVersion。只有轮次边界可以结束会话，结束后的会话禁止继续修改。
+进入下一单元前，当前单元必须完成建议生成，并且每条建议链的最新候选必须最终 ACCEPT 或 REJECT。CUSTOM 后仍在生成或等待决定时不能完成单元。0 条建议也需要成功生成记录。最后一个单元完成后，系统保存该轮 LessonPlanVersion。只有轮次边界可以结束会话，结束后的会话禁止继续修改。
 
 ### 5.8 历史、恢复与结果
 
@@ -444,13 +447,14 @@ flowchart LR
 | POST `/sessions/{session_id}/view` | 记录实际渲染内容 | 显式提交 round、section、version、suggestion、decision ID |
 | POST `/sessions/{session_id}/suggestions` | 创建当前单元生成任务 | 真实模型返回 202；Mock 为同步 200 |
 | POST `/sessions/{session_id}/suggestions/{suggestion_id}/decision` | 采纳或拒绝 | 支持安全追加确认和 expected_version_id |
+| POST `/sessions/{session_id}/suggestions/{suggestion_id}/custom-prompt` | 自定义再生成 | 保存要求和 CUSTOM 决定；真实模型返回 202，由 Worker 生成下一版 |
+| POST `/sessions/{session_id}/suggestions/{suggestion_id}/custom-prompt/retry` | 重试自定义任务 | 仅允许重试失败的 Refinement 任务 |
 | POST `/sessions/{session_id}/complete-section` | 完成单元 | 需要已生成且全部建议已处理 |
 | POST `/sessions/{session_id}/rounds/{round_id}/continue` | 进入下一轮 | 上一轮必须完成，最多 5 轮 |
 | POST `/sessions/{session_id}/terminate` | 结束会话 | 只能在 ROUND_COMPLETED 状态调用 |
 | GET `/sessions/{session_id}/final` | 获取最终状态 | 会话必须已终止 |
 | GET `/sessions/{session_id}/export` | 导出完整研究记录 | JSON schema version 2 |
 | GET `/sessions/{session_id}/chat` | 读取会话消息 | 返回服务端保存的消息记录 |
-| POST `/sessions/{session_id}/custom-prompt` | 主动探询占位 | 当前固定返回 403 |
 
 ## 10. 数据架构
 
@@ -483,8 +487,8 @@ flowchart LR
 | 表 | 作用 |
 |---|---|
 | generation_records | 模型调用上下文、原始返回和失败代码 |
-| suggestions | 0–2 条结构化建议、范围、修订模式和来源 |
-| decisions | 不可变的 ACCEPT/REJECT 决定 |
+| suggestions | 初始建议和链式自定义候选；包含 thread、父建议、尝试序号、范围、修订模式和来源 |
+| decisions | 不可变的 ACCEPT/REJECT/CUSTOM 决定 |
 | retrieval_records | 查询、过滤器、retriever、返回 ID、分数和 top-k |
 | context_snapshots | 精确记录一次生成使用的上下文和所有来源 |
 | interaction_events | 每会话严格递增的事件序列 |
@@ -496,7 +500,7 @@ flowchart LR
 | lesson_overviews | 会话创建时生成一次的单元列表和目标/活动/评价摘录 |
 | conversations | 每个会话一个消息容器 |
 | chat_messages | 教案、建议和决定的消息式研究记录 |
-| custom_prompts | 主动探询预留记录 |
+| custom_prompts | 教师自定义要求、幂等请求编号、父建议和生成记录 |
 | user_preferences | 用户偏好预留结构 |
 
 ### 10.5 数据集、案例与知识
@@ -777,7 +781,7 @@ Worker 崩溃后，租约过期的 RUNNING 任务会被重新领取。供应商�
 2. **真实知识内容不足**：架构已接入，最近验收基线仍是 0 条 verified case、0 条 verified knowledge。
 3. **教师质量评估未完成**：真实 DeepSeek 链路成功不等于反馈正确、适龄、可执行或有教学价值。
 4. **实验条件未实现**：没有三条件随机分配、盲法、量表、成长评分和统计分析。
-5. **主动探询未启用**：CustomPrompt 只有占位表和 403 接口。
+5. **自由主动探询未启用**：针对已有建议的自定义再生成已经实现，但系统仍没有脱离当前候选的开放式聊天与主动提问流程。
 6. **聊天不是用户功能**：消息用于审计，没有自由对话工作台。
 7. **偏好尚未生效**：UserPreference 和 contributor 已预留，默认返回空。
 

@@ -3,9 +3,9 @@
 **A Knowledge-Augmented Human-AI Framework for Scaffolding Novice Teacher Lesson-Plan Revision and Professional Growth**<br>
 **一个以知识增强和人机协作为基础、支持新手教师教案修订与专业成长的框架**
 
-研究型教案修订 MVP。支持粘贴文本或上传 DOCX、文本型/扫描型 PDF，经过文字提取或后台 OCR、预览校对、动态分段、0–2 条建议、Yes/No 决策、单元修订和多轮迭代后生成最终教案。原文件、V0 和完整修订过程会持久保存，刷新页面后可从数据库恢复。
+研究型教案修订 MVP。支持粘贴文本或上传 DOCX、文本型/扫描型 PDF，经过文字提取或后台 OCR、预览校对、动态分段、0–2 条建议、采纳/拒绝/自定义再生成、单元修订和多轮迭代后生成最终教案。自定义候选可反复生成，直到教师最终采纳或拒绝。原文件、V0 和完整修订过程会持久保存，刷新页面后可从数据库恢复。
 
-This research-oriented lesson-plan revision MVP accepts pasted text, DOCX files, and text-based or scanned PDFs. Its workflow covers text extraction or background OCR, proofreading, dynamic sectioning, 0–2 suggestions, Yes/No decisions, section revision, multiple rounds, and a final lesson plan. The source file, V0, and the complete revision history are persisted and can be restored after a page refresh.
+This research-oriented lesson-plan revision MVP accepts pasted text, DOCX files, and text-based or scanned PDFs. Its workflow covers text extraction or background OCR, proofreading, dynamic sectioning, 0–2 suggestions, accept/reject/custom regeneration, section revision, multiple rounds, and a final lesson plan. Teachers can refine a candidate repeatedly until they finally accept or reject it. The source file, V0, and the complete revision history are persisted and can be restored after a page refresh.
 
 ## 快速运行 / Quick Start (Windows)
 
@@ -156,6 +156,8 @@ This command only reads 41 source lesson plans and 1,118 raw annotations. It nei
   Pedagogical evidence carries a verification state. Retrieval is implemented, but only human-verified knowledge and cases can enter model context; the current baseline contains no verified items.
 - 每轮每单元最多生成一组成功建议；0 条建议同样会被持久记录，失败任务可以重试。<br>
   Each section can have at most one successful suggestion set per round; zero suggestions are also persisted, and failed jobs can be retried.
+- 每条当前建议可以采纳、拒绝，或填写最多 2,000 字的自定义要求让模型异步生成下一版；完整候选链保留在历史中，只有最终采纳才修改正文。<br>
+  Each current suggestion can be accepted, rejected, or regenerated asynchronously from a custom instruction of up to 2,000 characters. The full candidate chain is retained, and only final acceptance changes the lesson text.
 - 真实模型任务先保存到数据库，再由 Worker 在请求事务之外调用模型；页面显示排队和运行状态并自动获取结果。<br>
   Live-model jobs are saved before a Worker calls the model outside the request transaction; the page displays queued/running states and retrieves results automatically.
 - 长单元按 UTF-8 字节预算在模型内部切块，教师仍按原教学单元审阅；开始前会估算调用次数并检查安全上限。<br>

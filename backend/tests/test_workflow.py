@@ -130,7 +130,6 @@ def test_validation_ownership_and_view_log(client):
     post(client, state, '/view', {**target(state), 'section_version_id': current(state)['version']['id']})
     state = post(client, state, '/suggestions', target(state))
     post(client, other, f"/suggestions/{current(state)['suggestions'][0]['id']}/decision", {'decision': 'ACCEPT'}, expected=404)
-    post(client, state, '/custom-prompt', expected=403)
     assert client.get(f"/api/sessions/{state['session']['id']}/final").status_code == 409
     assert client.get(f'/api/sessions/{uuid4()}/current-state').status_code == 404
     export = client.get(f"/api/sessions/{state['session']['id']}/export").json()
@@ -170,3 +169,35 @@ def test_view_ack_records_rendered_version_instead_of_newer_database_version(cli
                                  'suggestion_ids': suggestion_ids, 'decision_ids': []})
     export = client.get(f"/api/sessions/{state['session']['id']}/export").json()
     assert export['interaction_events'][-1]['event_payload']['section_version_id'] == old_version
+
+
+def test_custom_suggestion_can_repeat_until_terminal_decision(client):
+    state, original = create(client, '教学目标\n理解分数。')
+    state = post(client, state, '/suggestions', target(state))
+    first, second = current(state)['suggestions']
+
+    state = post(client, state, f"/suggestions/{first['id']}/custom-prompt", {
+        'request_key': str(uuid4()), 'prompt_text': '请缩短为五分钟，并减少教师讲解。'})
+    revised = current(state)['suggestions'][0]
+    assert revised['attempt_number'] == 2
+    assert len(revised['history']) == 2
+    assert revised['history'][0]['decision']['decision'] == 'CUSTOM'
+    assert revised['history'][0]['custom_prompt']['prompt_text'].startswith('请缩短')
+    post(client, state, '/complete-section', target(state), expected=409)
+
+    state = post(client, state, f"/suggestions/{revised['id']}/custom-prompt", {
+        'request_key': str(uuid4()), 'prompt_text': '再改为个人书面活动，不要小组讨论。'})
+    final_candidate = current(state)['suggestions'][0]
+    assert final_candidate['attempt_number'] == 3
+    assert len(final_candidate['history']) == 3
+    assert current(state)['current_content'] == original['content']
+
+    state = post(client, state, f"/suggestions/{final_candidate['id']}/decision", {'decision': 'ACCEPT'})
+    state = post(client, state, f"/suggestions/{second['id']}/decision", {'decision': 'REJECT'})
+    state = post(client, state, '/complete-section', target(state))
+    assert state['session']['status'] == 'ROUND_COMPLETED'
+    export = client.get(f"/api/sessions/{state['session']['id']}/export").json()
+    assert [item['decision'] for item in export['decisions']] == ['CUSTOM', 'CUSTOM', 'ACCEPT', 'REJECT']
+    assert len(export['custom_prompts']) == 2
+    assert len(export['generation_records']) == 3
+    assert {item['generation_kind'] for item in export['generation_records']} == {'INITIAL', 'REFINEMENT'}
